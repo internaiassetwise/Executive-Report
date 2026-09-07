@@ -1,0 +1,10 @@
+'use client';
+import {BarChart,Bar,LineChart,Line,ScatterChart,Scatter,XAxis,YAxis,CartesianGrid,Tooltip,ResponsiveContainer} from 'recharts';
+import type {AnalysisResult} from '@/lib/models';
+export function AnalysisChart({result}:{result:AnalysisResult}){
+ const c=result.chart;if(!c||!c.points.length)return null;
+ const axis={fontSize:12,fill:'#73859b'};
+ return <div className="chart-wrap"><div className="chart-unit">{c.unit}{c.type==='scatter'?' · X: '+c.x_label:''}</div><ResponsiveContainer width="100%" height={265}>
+ {c.type==='line'?<LineChart data={c.points} margin={{top:8,right:20,bottom:15,left:5}}><CartesianGrid strokeDasharray="3 5" vertical={false} stroke="#e6ecf3"/><XAxis dataKey="label" tick={axis} axisLine={false} tickLine={false}/><YAxis tick={axis} axisLine={false} tickLine={false} width={65}/><Tooltip/><Line dataKey="value" name={c.unit} stroke="#234f7b" strokeWidth={2.5} dot={{r:3,fill:'#234f7b'}} isAnimationActive={false}/></LineChart>:c.type==='scatter'?<ScatterChart margin={{top:8,right:20,bottom:15,left:5}}><CartesianGrid strokeDasharray="3 5" stroke="#e6ecf3"/><XAxis type="number" dataKey="x" name={c.x_label} tick={axis}/><YAxis type="number" dataKey="y" name={c.unit} tick={axis} width={65}/><Tooltip cursor={{strokeDasharray:'3 3'}}/><Scatter data={c.points} fill="#34699a" isAnimationActive={false}/></ScatterChart>:<BarChart data={c.points} margin={{top:8,right:20,bottom:35,left:5}}><CartesianGrid strokeDasharray="3 5" vertical={false} stroke="#e6ecf3"/><XAxis dataKey="label" tick={axis} axisLine={false} tickLine={false} interval="preserveStartEnd" tickFormatter={v=>String(v).length>14?String(v).slice(0,12)+'…':String(v)}/><YAxis tick={axis} axisLine={false} tickLine={false} width={65}/><Tooltip/><Bar dataKey="value" name={c.unit} fill="#315e89" radius={[4,4,0,0]} maxBarSize={55} isAnimationActive={false}/></BarChart>}
+ </ResponsiveContainer>{c.type==='scatter'&&c.points.length===1000&&<small>แสดงตัวอย่างไม่เกิน 1,000 จุด สถิติคำนวณจากคู่ข้อมูลทั้งหมด</small>}</div>
+}

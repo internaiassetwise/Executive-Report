@@ -1,0 +1,19 @@
+{
+  "name": "asw-data-insight",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "workspaces": ["frontend", "backend"],
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:frontend": "npm run dev --workspace=@asw/frontend",
+    "dev:backend": "npm run dev --workspace=@asw/backend",
+    "build": "npm run build --workspace=@asw/frontend",
+    "typecheck": "npm run typecheck --workspace=@asw/frontend",
+    "test": "npm run test --workspaces --if-present",
+    "test:analysis": "python backend/tests/test_engine.py",
+    "test:runtime": "npm run test:runtime --workspace=@asw/frontend",
+    "lint": "npm run lint --workspace=@asw/frontend"
+  }
+}

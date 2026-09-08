@@ -48,10 +48,19 @@ export default defineConfig(async ({ mode }) => {
   process.env.WRANGLER_LOG_PATH ??= '.wrangler/logs';
   process.env.MINIFLARE_REGISTRY_PATH ??= '.wrangler/registry';
 
-  // Wrangler snapshots its log path while the Cloudflare plugin is imported.
-  const { cloudflare } = await import('@cloudflare/vite-plugin');
   const { BACKEND_URL } = loadEnv(mode, process.cwd(), 'BACKEND_');
   const backendUrl = BACKEND_URL || 'http://127.0.0.1:8000';
+  // Keep the default build portable for Node hosts such as Railway. The
+  // Cloudflare adapter is enabled only for a workstation linked to Sites.
+  const hostingPlugins = hostingConfig
+    ? [
+        sites(),
+        (await import('@cloudflare/vite-plugin')).cloudflare({
+          viteEnvironment: { name: 'rsc', childEnvironments: ['ssr'] },
+          config: localBindingConfig,
+        }),
+      ]
+    : [];
 
   return {
     css: { postcss: { plugins: [tailwindcss()] } },
@@ -78,11 +87,7 @@ export default defineConfig(async ({ mode }) => {
     },
     plugins: [
       vinext(),
-      ...(hostingConfig ? [sites()] : []),
-      cloudflare({
-        viteEnvironment: { name: 'rsc', childEnvironments: ['ssr'] },
-        config: localBindingConfig,
-      }),
+      ...hostingPlugins,
     ],
   };
 });

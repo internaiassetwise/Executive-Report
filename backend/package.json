@@ -5,6 +5,7 @@
   "type": "module",
   "engines": { "node": ">=22.13.0" },
   "scripts": {
+    "build": "node --check src/server.mjs && node --check src/app.mjs && node --check src/gemini.mjs",
     "dev": "node --watch src/server.mjs",
     "start": "node src/server.mjs",
     "test": "node --test tests/*.test.mjs"

@@ -45,6 +45,9 @@ dist/
 
 # local deployment, editor and agent metadata
 .openai/
+.railway/*
+!.railway/railway.ts
+!.railway/README.md
 .codex/
 .agents/
 .idea/

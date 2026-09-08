@@ -11,7 +11,7 @@
     "test": "node --test tests/interpretation.test.mjs",
     "test:runtime": "node tests/pyodide-smoke.mjs",
     "build": "vinext build",
-    "start": "wrangler dev --config dist/server/wrangler.json",
+    "start": "vinext start",
     "lint": "oxlint",
     "format": "oxfmt"
   },

@@ -5,8 +5,8 @@ import { createHandler } from './app.mjs';
 
 const envFile = fileURLToPath(new URL('../.env', import.meta.url));
 if (existsSync(envFile)) process.loadEnvFile(envFile);
-const port = Number(process.env.BACKEND_PORT || 8000);
-if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid BACKEND_PORT');
+const port = Number(process.env.PORT || process.env.BACKEND_PORT || 8000);
+if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
 const handler = createHandler({
   apiKey: process.env.GEMINI_API_KEY || '',
   model: process.env.GEMINI_MODEL || '',
@@ -15,7 +15,7 @@ const handler = createHandler({
 
 const server = createServer(async (incoming, outgoing) => {
   try {
-    // Bind to loopback and use a fixed local request origin; never trust the Host header.
+    // Use a fixed local request origin for routing; never trust the Host header.
     const path = incoming.url || '/';
     if (!path.startsWith('/') || path.startsWith('//')) { outgoing.writeHead(400); outgoing.end(); return; }
     const method = incoming.method || 'GET';
@@ -43,6 +43,6 @@ const server = createServer(async (incoming, outgoing) => {
 });
 
 server.requestTimeout = 60_000;
-server.listen(port, '127.0.0.1', () => console.log(`Backend ready: http://127.0.0.1:${port}`));
+server.listen(port, '0.0.0.0', () => console.log(`Backend ready on 0.0.0.0:${port}`));
 server.on('error', error => { console.error(`Backend could not listen (${error.code || 'unknown'}).`); process.exitCode = 1; });
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { server.close(() => process.exit(0)); server.closeAllConnections(); });

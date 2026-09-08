@@ -73,4 +73,6 @@ npm run build
 
 ## การเผยแพร่
 
-ขณะนี้ใช้ localhost ตามคำขอ การจัดไฟล์ไม่ได้เผยแพร่ทับเว็บออนไลน์เดิม หากต้องการเผยแพร่โครงสร้างใหม่นี้ ต้องเตรียม backend ที่หน้าเว็บเข้าถึงได้ และกำหนด `BACKEND_URL` กับ `FRONTEND_ORIGINS` ให้ตรงกันก่อน
+โปรเจกต์เตรียมไว้สำหรับ Railway แบบ 2 services ใน private network แล้ว โดยใช้ Infrastructure as Code ที่ `.railway/railway.ts` หน้าเว็บรันด้วย `vinext start` ซึ่งอ่าน `PORT` อัตโนมัติ ส่วน backend อ่าน `PORT` และ bind ที่ `0.0.0.0`
+
+ขั้นตอนตรวจแผน, apply, สร้าง public domain และตั้งค่า Gemini อยู่ใน [คู่มือ Railway](.railway/README.md) การ deploy จาก GitHub จะใช้เฉพาะโค้ดที่ commit และ push แล้ว

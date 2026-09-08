@@ -18,3 +18,9 @@
 .results-pagination{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:22px;font-size:13px;color:#74869b;text-align:center}
 .report-coverage{font-size:12px;width:100%;border-collapse:collapse;margin:16px 0}.report-coverage th,.report-coverage td{padding:8px;text-align:left;border-bottom:1px solid #e5edf4}.report-coverage th{color:var(--navy)}
 @media(max-width:700px){.all-sheets-badge{margin-left:0}.results-pagination{flex-wrap:wrap}.results-pagination span{order:3;flex-basis:100%}.workbook-table{margin-left:5px;padding-left:10px}}
+/* BOQ comparison mode */
+.boq-frame{width:100%;border:1px solid var(--border);border-radius:8px;background:#eceff4;display:block}
+.boq-outline{list-style:none;margin:18px 0 0;padding:0}.boq-outline li{display:flex;gap:16px;font-size:14px;line-height:1.8;border-top:1px solid #edf1f6;padding:12px 4px}.boq-outline li span{font-family:Inter,sans-serif;color:#9db0c4;font-size:12px;padding-top:4px}
+.tolerance-input{width:100%;border:1px solid #dae3ec;border-radius:6px;background:#fbfcfe;padding:12px 13px;font-size:20px;font-weight:600;color:var(--navy);margin-top:8px}.tolerance-input[aria-invalid=true]{border-color:#e0a4a0;background:#fff7f6}
+.boq-cards{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}.boq-vendors td b{font-weight:600}
+@media(max-width:700px){.boq-frame{border-radius:0}}

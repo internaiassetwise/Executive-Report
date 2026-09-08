@@ -1,7 +1,7 @@
 // Transport only: provider settings and Gemini logic live in backend/.
 const endpoint = () => (process.env.BACKEND_URL || 'http://127.0.0.1:8000').replace(/\/$/, '');
 
-export async function backendProxy(request: Request, path: '/api/interpret' | '/api/analysis-engine') {
+export async function backendProxy(request: Request, path: '/api/interpret' | '/api/analysis-engine' | '/api/boq-engine' | '/api/boq-report') {
   if (request.method === 'POST' && request.headers.get('origin') !== new URL(request.url).origin) {
     return Response.json({ error: 'Origin not allowed' }, { status: 403 });
   }

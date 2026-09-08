@@ -66,6 +66,14 @@ export default defineConfig(async ({ mode }) => {
           target: backendUrl, changeOrigin: false,
           rewrite: () => '/api/analysis-engine',
         },
+        '/boq_engine.py': {
+          target: backendUrl, changeOrigin: false,
+          rewrite: () => '/api/boq-engine',
+        },
+        '/boq_report.py': {
+          target: backendUrl, changeOrigin: false,
+          rewrite: () => '/api/boq-report',
+        },
       },
     },
     plugins: [

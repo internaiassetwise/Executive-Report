@@ -40,4 +40,5 @@ function start(name, cwd, args) {
 process.on('SIGINT', () => stop());
 process.on('SIGTERM', () => stop());
 start('Backend', 'backend', ['src/server.mjs']);
-start('Frontend', 'frontend', [resolve(root, 'node_modules/vinext/dist/cli.js'), 'dev', '--host', '127.0.0.1', '--port', '3000']);
+const frontendPort = process.env.FRONTEND_PORT || '3000';
+start('Frontend', 'frontend', [resolve(root, 'node_modules/vinext/dist/cli.js'), 'dev', '--host', '127.0.0.1', '--port', frontendPort]);

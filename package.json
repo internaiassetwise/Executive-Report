@@ -13,6 +13,7 @@
     "typecheck": "npm run typecheck --workspace=@asw/frontend",
     "test": "npm run test --workspaces --if-present",
     "test:analysis": "python backend/tests/test_engine.py",
+    "test:boq": "python backend/tests/test_boq.py",
     "test:runtime": "npm run test:runtime --workspace=@asw/frontend",
     "lint": "npm run lint --workspace=@asw/frontend"
   }

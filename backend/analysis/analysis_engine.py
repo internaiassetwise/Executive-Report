@@ -279,12 +279,12 @@ def plan(t):
                 add('correlation',f'{cols[i]["name"]} ↔ {cols[j]["name"]}','Pearson correlation ของแถวที่มีค่าครบ ไม่สรุปเหตุและผล',[i,j])
     return plans
 
-def inspect(raw, filename):
+def inspect(raw, filename, sheets=None):
     TABLES.clear()
     WORKBOOK.clear()
     if not raw:raise ValueError('ไฟล์ว่าง กรุณาเลือกไฟล์ที่มีข้อมูล')
     if len(raw)>15*1024*1024:raise ValueError('ไฟล์ใหญ่กว่า 15 MB กรุณาแบ่งไฟล์')
-    sheets=load_sheets(raw,filename)
+    sheets=sheets if sheets is not None else load_sheets(raw,filename)
     tables=[]; notes=[]
     for sheet in sheets:
         tables.extend(detect(sheet))
@@ -405,8 +405,40 @@ def analyze_workbook(selected_types=None, objective='', progress=None):
     if empty:overview.append(f'{empty} ชีตไม่มีตารางที่เข้าเกณฑ์ จึงแสดงเหตุผลไว้ในขอบเขตรายงาน')
     return {'metadata':{'title':'รายงานการวิเคราะห์ข้อมูลทุกชีต','table':f"ภาพรวม {len(sheets)} ชีต · {len(TABLES)} ตาราง",'source_range':'ทุกตารางที่ตรวจพบ','objective':objective[:1000],'generated_at':datetime.now().isoformat(),'engine':'Python deterministic engine 1.1','interpretation_mode':'evidence-based templates'},'dataset_overview':{'scope':'workbook','rows_count':summary['rows_count'],'columns_count':summary['columns_count'],'cells_count':summary['cells_count'],'sheets_count':len(sheets),'tables_count':len(TABLES),'sheet':'ทุกชีต','range':'ทุกตารางที่ตรวจพบ','columns':[],'sheets':sheets,'tables':table_reports},'data_quality':summary['quality'],'excluded_rows':[{**r,'source':table_source(t)} for t in TABLES.values() for r in t['excluded_rows']],'analyses':results,'evidence':evidence,'errors':errors,'sections':list(dict.fromkeys(r['type'] for r in results)),'executive_summary':overview,'recommendations':['ตรวจสอบประเด็นคุณภาพข้อมูลและตารางที่หาหัวตารางได้ด้วยความมั่นใจต่ำ','ตรวจทานความหมายและหน่วยของตัวชี้วัดกับเจ้าของข้อมูลก่อนใช้ตัดสินใจ'],'limitations':['คำนวณทุกตารางที่ตรวจพบโดยแยกกัน ไม่มีการ join หรือบวกตัวชี้วัดข้ามตาราง','ความครบถ้วนถ่วงตามจำนวนเซลล์ข้อมูล แถวซ้ำตรวจภายในแต่ละตารางและยังเก็บไว้','ชีตว่างหรือชีตที่ไม่มีตารางเข้าเกณฑ์แสดงในขอบเขต โดยไม่สร้างผลคำนวณแทน','ไม่คำนวณสูตร Excel ใหม่ และไม่อนุมานเหตุและผล','วัตถุประสงค์บันทึกในรายงานและใช้ประกอบคำตีความเมื่อเปิด Gemini']}
 
+BOQ_BOOKS=[]
+
+def boq(files, tolerance=None, progress=None):
+    """Benchmark-comparison path for one or more uploads. Loaded sheets stay in
+    BOQ_BOOKS so a tolerance change rebuilds without re-reading the files. A
+    single upload with no comparison structure falls through to the generic
+    inspection on the sheets already in memory."""
+    import boq_engine, boq_report
+    BOQ_BOOKS.clear()
+    for i,f in enumerate(files):
+        raw=bytes(f['bytes'])
+        if not raw:raise ValueError(f"{f['filename']}: ไฟล์ว่าง กรุณาเลือกไฟล์ที่มีข้อมูล")
+        if len(raw)>15*1024*1024:raise ValueError(f"{f['filename']}: ไฟล์ใหญ่กว่า 15 MB กรุณาแบ่งไฟล์")
+        if progress:progress(i+1,len(files),f['filename'])
+        BOQ_BOOKS.append((load_sheets(raw,f['filename']),f['filename'],raw))
+    report=boq_engine.build_many([(s,n) for s,n,_ in BOQ_BOOKS],tolerance)
+    if report is None:
+        if len(files)==1:
+            sheets,name,raw=BOQ_BOOKS[0]
+            return {'mode':'generic','book':inspect(raw,name,sheets)}
+        return {'mode':'none'}
+    return {'mode':'boq','report':report,'html':boq_report.render(report)}
+
+def boq_rebuild(tolerance=None):
+    import boq_engine, boq_report
+    if not BOQ_BOOKS:raise ValueError('ไม่พบไฟล์ กรุณาอัปโหลดใหม่')
+    report=boq_engine.build_many([(s,n) for s,n,_ in BOQ_BOOKS],tolerance)
+    if report is None:raise ValueError('ไม่พบคอลัมน์เปรียบเทียบผู้เสนอราคากับราคากลาง')
+    return {'mode':'boq','report':report,'html':boq_report.render(report)}
+
 def dispatch(action, payload, progress=None):
     if action=='inspect':return inspect(bytes(payload['bytes']),payload['filename'])
     if action=='analyze':return analyze(payload['table_id'],payload['selected'],payload.get('objective',''))
     if action=='analyze_workbook':return analyze_workbook(payload.get('selected_types'),payload.get('objective',''),progress)
+    if action=='boq':return boq(payload['files'],payload.get('tolerance'),progress)
+    if action=='boq_rebuild':return boq_rebuild(payload.get('tolerance'))
     raise ValueError('Unknown action')

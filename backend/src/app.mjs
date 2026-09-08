@@ -7,8 +7,11 @@ export function createHandler(config, fetcher = fetch) {
     if (path === '/api/health' && request.method === 'GET') {
       return Response.json({ status: 'ok', service: 'asw-backend' });
     }
-    if (path === '/api/analysis-engine' && request.method === 'GET') {
-      const source = await readFile(new URL('../analysis/analysis_engine.py', import.meta.url), 'utf8');
+    // The browser runtime executes these three modules in Pyodide; the files
+    // themselves are the single source of truth for every calculation.
+    const sources = { '/api/analysis-engine': 'analysis_engine.py', '/api/boq-engine': 'boq_engine.py', '/api/boq-report': 'boq_report.py' };
+    if (sources[path] && request.method === 'GET') {
+      const source = await readFile(new URL(`../analysis/${sources[path]}`, import.meta.url), 'utf8');
       return new Response(source, { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
     }
     if (path === '/api/interpret') {

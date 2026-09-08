@@ -15,7 +15,7 @@ export interface BoqTotals {total:number;benchmark_items:number;comparable:numbe
 export interface BoqGroup extends BoqTotals {group:string;sheets:string[]}
 export interface BoqVendor {vendor:string;benchmark:string;project:string|null;filename:string;axes:string[];sheets_used:string[];sheets_skipped:{sheet:string;reason:string}[];file_tolerance:number|null;tolerance_sample:number;tolerance:number;tolerance_source:string;groups:BoqGroup[];total:BoqTotals;insights:string[]}
 export interface BoqReport {
-  tolerance:number;tolerance_source:'declared'|'inferred'|'default';vendors:BoqVendor[];files:string[];files_skipped:{filename:string;reason:string}[];groups:string[];
+  tolerance:number;tolerance_source:'declared'|'inferred'|'default';vendors:BoqVendor[];files:string[];files_skipped:{filename:string;reason:string}[];groups:string[];categories:string[];categories_missing:boolean;
   comparison:Record<string,Record<string,Record<string,number|null>>>;signatures:{vendor:string;pattern:string;top_groups:string}[];strategy:string[];
   executive:{rows:{vendor:string;original:number;normalized:number;savings:number;savings_pct:number|null}[];summary:string;bullets:string[];headline:string};
 }

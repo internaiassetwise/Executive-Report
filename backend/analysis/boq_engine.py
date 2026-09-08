@@ -49,6 +49,7 @@ RATIO_CAP = 20
 MIN_INSIGHT_ITEMS = 5
 MIN_TOLERANCE_SAMPLE = 20
 DEFAULT_TOLERANCE = 0.15
+UNCATEGORIZED = 'ไม่ระบุหมวดงานในไฟล์'
 # Two unlabelled sheets whose benchmark lines agree, position by position, at
 # least this closely are one BOQ priced by different vendors.
 SAME_BOQ = 0.9
@@ -264,7 +265,8 @@ def detect(sheets):
         found.append({'sheet': name, 'header_row': h, 'vendors': vendors,
                       'note_columns': [i for i, c in enumerate(header)
                                        if 'หมายเหตุ' in norm(c) or 'remark' in norm(c) or 'note' in norm(c)],
-                      'category_column': first(is_category), 'item_column': first(is_item), 'grid': grid})
+                      'category_column': first(is_category), 'item_column': first(is_item),
+                      'grid': grid, 'merges': sheet.get('merges') or []})
     return found, skipped
 
 
@@ -281,18 +283,56 @@ def read_rows(found):
     for f in found:
         base = sheet_group(f['sheet'])
         cat_col, item_col = f['category_column'], f['item_column']
-        for r in f['grid'][f['header_row'] + 1:]:
-            category = None
-            if cat_col is not None and cat_col < len(r) and r[cat_col] is not None and str(r[cat_col]).strip():
-                category = str(r[cat_col]).strip()
+        data_start = f['header_row'] + 1
+        merged = {}
+        if cat_col is not None:
+            # Excel keeps a merged range's value only in its top-left cell.
+            # Expand only ranges that cover the detected category column.
+            excel_col = cat_col + 1
+            for r1, c1, r2, c2 in f.get('merges') or []:
+                if (not (c1 <= excel_col <= c2) or r1 < 1 or c1 < 1
+                        or r1 - 1 < data_start):
+                    continue
+                anchor_row = f['grid'][r1 - 1] if r1 - 1 < len(f['grid']) else []
+                value = anchor_row[c1 - 1] if c1 - 1 < len(anchor_row) else None
+                if value is None or not str(value).strip():
+                    continue
+                for row_index in range(max(data_start, r1 - 1), min(len(f['grid']), r2)):
+                    merged[row_index] = str(value).strip()
+        raw_categories = {}
+        for row_index in range(data_start, len(f['grid'])):
+            row = f['grid'][row_index]
+            direct = None
+            if cat_col is not None and cat_col < len(row) and row[cat_col] is not None and str(row[cat_col]).strip():
+                direct = str(row[cat_col]).strip()
+            raw_categories[row_index] = direct or merged.get(row_index)
+        has_sheet_categories = any(raw_categories.values())
+        last_category = None
+        for row_index, r in enumerate(f['grid'][data_start:], data_start):
+            raw_category = raw_categories.get(row_index)
+            if raw_category:
+                last_category = raw_category
+            if has_sheet_categories:
+                # Category cells are commonly merged or written once above a
+                # run of detail rows. Carry the last value forward within the
+                # same sheet; never translate or manufacture a category name.
+                category = raw_category or last_category
+                group = category or UNCATEGORIZED
+                category_source = 'column' if category else 'missing'
+            elif base:
+                category = None
+                group = base
+                category_source = 'sheet_prefix'
+            else:
+                category = None
+                group = f['sheet'].strip()
+                category_source = 'sheet'
             item = norm(r[item_col]) if item_col is not None and item_col < len(r) else ''
-            # With a category column in play, a row that names no category is
-            # a heading or a grand total for the sheet, never a line item.
-            uncategorized = base is None and cat_col is not None and category is None
             note = note_class(r, f['note_columns'])
             for vendor, spec in f['vendors'].items():
-                rec = {'sheet': f['sheet'], 'vendor': vendor, 'group': base or category or f['sheet'].strip(),
-                       'category': category, 'item': item, 'note': note}
+                rec = {'sheet': f['sheet'], 'vendor': vendor, 'group': group,
+                       'category': category, 'category_source': category_source,
+                       'item': item, 'note': note}
                 has_value = False
                 for axis, roles in spec['columns'].items():
                     for role, idx in roles.items():
@@ -310,10 +350,19 @@ def read_rows(found):
                 # nothing in another). A benchmark total alone does not: that
                 # is a benchmark line the vendor left unquoted, and it stays.
                 own_total = any(rec.get(f'total_{k}') for k in ('proposal', 'normalized'))
-                rec['parent'] = uncategorized or (own_total and not rec['priced'])
+                rec['parent'] = own_total and not rec['priced']
                 if has_value:
                     rows.append(rec)
     return rows
+
+
+def display_categories(rows):
+    """File-derived display labels in first-seen order.
+
+    The missing-category bucket is deliberately excluded: it is a disclosure,
+    not a category name supplied by the workbook.
+    """
+    return list(dict.fromkeys(r['group'] for r in rows if r.get('category_source') != 'missing'))
 
 
 def split_sheet_vendors(found, rows):
@@ -383,8 +432,11 @@ def split_sheet_vendors(found, rows):
     for rec in rows:
         if rec['vendor'] == '' and rec['sheet'] in mapping:
             rec['vendor'] = mapping[rec['sheet']]
-            if sheet_group(rec['sheet']) is None:
-                rec['group'] = rec['category'] or rec['sheet'].strip()
+            # An unprefixed sheet title in this layout identifies the vendor,
+            # so presenting that same title as a work category would be false.
+            if rec.get('category_source') == 'sheet':
+                rec['group'] = UNCATEGORIZED
+                rec['category_source'] = 'missing'
     return mapping
 
 
@@ -522,7 +574,7 @@ def aggregate(rows, axes, tolerance):
 
 def summarize(agg, axes):
     groups = []
-    for key in sorted(agg):
+    for key in agg:
         g = agg[key]
         items = g['comparable'] + g['not_quoted']       # lines the benchmark lists
         rec = {'group': key, 'sheets': sorted(g['sheets']), 'total': g['total'],
@@ -589,6 +641,8 @@ def prepare(sheets, filename):
         out.append({'vendor': key or scanned.get('vendor') or stem(filename),
                     'benchmark': benchmark or 'ราคากลาง', 'project': scanned.get('project'),
                     'filename': filename, 'axes': axes, 'rows': recs,
+                    'categories': display_categories(recs),
+                    'categories_missing': any(r.get('category_source') == 'missing' for r in recs),
                     'sheets_used': sorted({r['sheet'] for r in recs}), 'sheets_skipped': skipped,
                     'file_tolerance': inferred, 'tolerance_sample': sample})
     return out
@@ -648,8 +702,8 @@ def vendor_insights(v):
                    f"ภาพรวมค่าแรง {pct(T.get('labour_dev_pct'))} ค่าของ {pct(T.get('material_dev_pct'))}")
     s = top(G, 'savings')
     if s and s['savings'] > 0:
-        out.append(f"หมวดที่ปรับได้มากที่สุดคือ {s['group']} ประหยัด {money(s['savings'])} บาท ({s['savings_pct']:.1f}% ของหมวด) "
-                   f"รวมทั้งหมด {money(T['savings'])} บาท หรือ {T['savings_pct']:.1f}% ของราคาที่เสนอ")
+        out.append(f"หมวดที่ปรับได้มากที่สุดคือ {s['group']} ประหยัด {money(s['savings'])} บาท ({pct(s['savings_pct'])} ของหมวด) "
+                   f"รวมทั้งหมด {money(T['savings'])} บาท หรือ {pct(T['savings_pct'])} ของราคาที่เสนอ")
     if T['not_quoted']:
         out.append(f"มี {T['not_quoted']:,} รายการใน {ref} ที่ {v['vendor']} ไม่ได้เสนอราคา ควรขอยืนยันขอบเขตก่อนเปรียบเทียบยอดรวม")
     if T.get('mismatch'):
@@ -710,7 +764,7 @@ def strategy(vendors, sigs):
                    f"{qty_heavy[0]['benchmark']} มาก ควรตรวจสอบปริมาณร่วม (Joint Re-measure) ก่อนตกลงราคา")
     closest = min(vendors, key=lambda x: x['total']['savings_pct'] or 0)
     if len(vendors) > 1:
-        out.append(f"{closest['vendor']} ใกล้เคียง {closest['benchmark']} ที่สุด (ปรับได้เพียง {closest['total']['savings_pct']:.1f}%) "
+        out.append(f"{closest['vendor']} ใกล้เคียง {closest['benchmark']} ที่สุด (ปรับได้เพียง {pct(closest['total']['savings_pct'])}) "
                    f"จึงเหมาะเป็นราคาอ้างอิงเปรียบเทียบ (Benchmark) ในการเจรจากับเจ้าอื่น")
     return out
 
@@ -724,15 +778,15 @@ def executive(vendors, sigs, tolerance):
     names = ', '.join(v['vendor'] for v in vendors)
     if len(vendors) > 1:
         summary = (f"รายงานฉบับนี้ตรวจสอบรายการ BOQ รวม {items:,} รายการ จากผู้เสนอราคา {len(vendors)} ราย ({names}) "
-                   f"พบว่าราคาที่เสนอสูงกว่าราคากลางอย่างมีนัยสำคัญในระดับ {lo['total']['savings_pct']:.1f}–{hi['total']['savings_pct']:.1f}% "
+                   f"พบว่าราคาที่เสนอสูงกว่าราคากลางอย่างมีนัยสำคัญในระดับ {pct(lo['total']['savings_pct'])}–{pct(hi['total']['savings_pct'])} "
                    f"โดย {lo['vendor']} ใกล้เคียงราคากลางที่สุด และ {hi['vendor']} ห่างจากราคากลางมากที่สุด")
     else:
         v = vendors[0]
         summary = (f"รายงานฉบับนี้ตรวจสอบรายการ BOQ รวม {items:,} รายการ ของ {v['vendor']} เทียบ {v['benchmark']} "
-                   f"พบว่าปรับลดได้ {v['total']['savings_pct']:.1f}% ของราคาที่เสนอ")
+                   f"พบว่าปรับลดได้ {pct(v['total']['savings_pct'])} ของราคาที่เสนอ")
     by = {s['vendor']: s for s in sigs}
     bullets = [f"{v['vendor']}: {by[v['vendor']]['pattern']} — หมวดที่กระทบมากที่สุด {by[v['vendor']]['top_groups']} "
-               f"ปรับได้ {money(v['total']['savings'])} บาท ({v['total']['savings_pct']:.1f}%)" for v in vendors]
+               f"ปรับได้ {money(v['total']['savings'])} บาท ({pct(v['total']['savings_pct'])})" for v in vendors]
     bullets.append(f"ข้อเสนอแนะเชิงกลยุทธ์: ใช้ผลการ Normalize ที่เกณฑ์ {tolerance * 100:.0f}% นี้เป็นฐานการเจรจา "
                    f"โดยเน้นจุดที่มีมูลค่าสูงสุดของแต่ละเจ้าก่อน")
     avg_s = sum(r['savings'] for r in rows) / len(rows)
@@ -765,16 +819,19 @@ def build_many(workbooks, tolerance=None):
             p['vendor'] = f"{p['vendor']} ({stem(p['filename'])})"
     tol, source = choose_tolerance(prepared, tolerance)
     vendors = [finish(p, tol, source) for p in prepared]
-    groups = sorted({g['group'] for v in vendors for g in v['groups']})
+    categories = list(dict.fromkeys(category for p in prepared for category in p['categories']))
+    categories_missing = any(p['categories_missing'] for p in prepared)
+    groups = list(dict.fromkeys(g['group'] for v in vendors for g in v['groups']))
     comparison = {}
     for key, field in (('labour_dev', 'labour_dev_pct'), ('material_dev', 'material_dev_pct'),
                        ('quantity_over', 'quantity_over')):
-        comparison[key] = {g: {v['vendor']: next((x[field] for x in v['groups'] if x['group'] == g), None)
+        comparison[key] = {g: {v['vendor']: next((x.get(field) for x in v['groups'] if x['group'] == g), None)
                                for v in vendors} for g in groups}
     sigs = [signature(v, vendors) for v in vendors]
     return {'tolerance': tol, 'tolerance_source': source, 'vendors': vendors, 'files_skipped': skipped,
             'files': [f for f in dict.fromkeys(fn for _, fn in workbooks)],
-            'groups': groups, 'comparison': comparison, 'signatures': sigs,
+            'groups': groups, 'categories': categories, 'categories_missing': categories_missing,
+            'comparison': comparison, 'signatures': sigs,
             'strategy': strategy(vendors, sigs), 'executive': executive(vendors, sigs, tol)}
 
 

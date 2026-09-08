@@ -78,6 +78,8 @@ def vendor_block(v, tol):
 
 def intro_block(rep, filenames):
     V = rep['vendors']
+    categories = rep.get('categories') or []
+    categories_missing = bool(rep.get('categories_missing'))
     tol = rep['tolerance'] * 100
     refs = sorted({v['benchmark'] for v in V})
     items = sum(v['total']['benchmark_items'] for v in V)
@@ -89,7 +91,7 @@ def intro_block(rep, filenames):
     p2 = (f"เกณฑ์การวิเคราะห์: ปริมาณหรือราคาที่สูงกว่าราคากลางเกิน {tol:.0f}% ถือว่า 'ผิดปกติ' (Flag) และใช้เป็นเกณฑ์ในการ Normalize "
           f"โดยปรับจุดที่ผิดปกติลงมาเท่าราคากลางทิศทางเดียว รายการที่ต่ำกว่าราคากลางนับไว้แต่ไม่ปรับขึ้น "
           f"เกณฑ์นี้{src} และใช้เกณฑ์เดียวกันกับทุกเจ้าเพื่อให้เปรียบเทียบกันได้")
-    p3 = ("ทุกตัวเลขในรายงานคำนวณจากไฟล์ที่อัปโหลดเท่านั้น ชื่อผู้เสนอราคา ชื่อราคากลาง และชื่อหมวดงานอ่านจากหัวคอลัมน์และชื่อชีตในไฟล์ "
+    p3 = ("ทุกตัวเลขในรายงานคำนวณจากไฟล์ที่อัปโหลดเท่านั้น ชื่อผู้เสนอราคาและชื่อราคากลางอ่านจากหัวคอลัมน์ ส่วนชื่อหมวดงานอ่านจากค่าคอลัมน์หมวดงานหรือข้อความในชื่อชีตของไฟล์ "
           "% ต่างราคาถ่วงน้ำหนักด้วยปริมาณตามราคากลางเพื่อวัดเฉพาะส่วนต่างราคาต่อหน่วย")
     scope = table(['ผู้เสนองาน', 'ไฟล์', 'โครงการ (ตามไฟล์)', 'ชีตที่ใช้', 'ชีตที่ตัดออก', 'รายการในราคากลาง', 'เกณฑ์ที่ไฟล์ปรับไว้เอง'],
                   [[v['vendor'], v['filename'], v.get('project') or '—', n(len(v['sheets_used'])), n(len(v['sheets_skipped'])),
@@ -97,7 +99,17 @@ def intro_block(rep, filenames):
                     f"{v['file_tolerance'] * 100:.1f}%" if v['file_tolerance'] is not None else 'ไม่พบ'] for v in V],
                   ['left', 'left', 'left', 'center', 'center', 'center', 'center'])
     out = ['<h2>บทนำและขอบเขตการวิเคราะห์</h2>', f'<p>{esc(p1)}</p>', f'<p>{esc(p2)}</p>', f'<p class="note">{esc(p3)}</p>',
-           '<h3>ขอบเขตข้อมูลที่นำมาคำนวณ</h3>', scope]
+           '<h3>หมวดงานที่พบในไฟล์</h3>']
+    if categories:
+        category_scope = '<div class="category-scope">' + table(
+            ['หมวดงานตามที่พบในไฟล์'], [[category] for category in categories], ['left']) + '</div>'
+        out.extend([f'<p class="note">พบ {n(len(categories))} หมวด ตามลำดับที่ปรากฏในไฟล์อัปโหลด ไม่มีการเติมชื่อหมวดงานจากภายนอก</p>',
+                    category_scope])
+    else:
+        out.append('<p class="note">ไม่พบชื่อหมวดงานในไฟล์ จึงไม่คาดเดาหรือเติมชื่อหมวดงานจากภายนอก</p>')
+    if categories_missing and categories:
+        out.append('<p class="note">บางรายการไม่ได้ระบุหมวดงานในไฟล์ จึงแยกไว้เป็น “ไม่ระบุหมวดงานในไฟล์” ในตารางวิเคราะห์</p>')
+    out.extend(['<h3>ขอบเขตข้อมูลที่นำมาคำนวณ</h3>', scope])
     if rep['files_skipped']:
         out.append('<p class="note">ไฟล์ที่ไม่ได้นำมาวิเคราะห์: ' +
                    '; '.join(f"{esc(f['filename'])} — {esc(f['reason'])}" for f in rep['files_skipped']) + '</p>')
@@ -150,18 +162,24 @@ def executive_block(rep):
 
 def render(rep, filenames=None, generated=None):
     V = rep['vendors']
+    categories = rep.get('categories') or []
+    categories_missing = bool(rep.get('categories_missing'))
     filenames = filenames or [v['filename'] for v in V]
     generated = generated or date.today().isoformat()
     projects = sorted({v['project'] for v in V if v.get('project')})
     names = ', '.join(v['vendor'] for v in V)
     run = f"{esc(projects[0]) if len(projects) == 1 else esc(names)} — Comprehensive Quantity &amp; Price Anomaly Analysis"
     pages = []
+    category_summary = (f"หมวดงาน {len(categories)} หมวดตามไฟล์" if categories
+                        else 'ไม่พบชื่อหมวดงานในไฟล์')
+    if categories and categories_missing:
+        category_summary += ' · มีบางรายการไม่ระบุหมวด'
     pages.append(f"""
  <div class="title">
   <h1>รายงานวิเคราะห์ปริมาณและราคาเชิงลึก</h1>
   <p class="sub">(Comprehensive Quantity &amp; Price Anomaly Analysis)</p>
   <p class="sub"><b>{'โครงการ ' + esc(' / '.join(projects)) if projects else 'ผู้เสนองาน ' + esc(names)}</b></p>
-  <p class="sub">ผู้เสนองาน {len(V)} ราย ({esc(names)}) · ทุกหมวดงานที่ตรวจพบในไฟล์</p>
+  <p class="sub">ผู้เสนองาน {len(V)} ราย ({esc(names)}) · {esc(category_summary)}</p>
   <div class="meta">
    จัดทำโดย: ASW Data Insight<br>
    อ้างอิงไฟล์: <i>{esc(', '.join(filenames))}</i><br>
@@ -201,6 +219,7 @@ th{{background:var(--navy);color:#fff;font-weight:600;padding:7px 8px;border:1px
 td{{padding:6px 8px;border:1px solid var(--line);line-height:1.4}}
 tbody tr:nth-child(even){{background:var(--stripe)}}
 tr.total td{{font-weight:700;background:#e6ebf4}}
+.category-scope table{{table-layout:fixed}}.category-scope td{{overflow-wrap:anywhere;word-break:break-word}}.category-scope tr{{break-inside:avoid}}
 ul{{margin:6px 0 14px;padding-left:22px}} li{{margin-bottom:6px}}
 .note{{font-size:10.5px;color:var(--muted)}}
 .call{{background:#fdf1dc;border-left:5px solid #e3901c;padding:10px 14px;font-weight:600;margin:18px 0 8px}}

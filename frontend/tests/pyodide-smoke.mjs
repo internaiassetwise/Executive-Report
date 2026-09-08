@@ -54,6 +54,8 @@ f=io.BytesIO(); b.save(f)
 json.dumps(dispatch('boq',{'files':[{'filename':'compare.xlsx','bytes':f.getvalue()}]},_report_progress),ensure_ascii=False,allow_nan=False)`));
 assert.equal(boq.mode,'boq');
 assert.deepEqual(boq.report.vendors.map(v=>v.vendor),['AAA','BBB']);
+assert.deepEqual(boq.report.categories,['ST','AR']);
+assert.equal(boq.report.categories_missing,false);
 assert.equal(boq.report.vendors[1].total.quantity_over,24);
 assert.ok(boq.html.includes('ผู้เสนองาน: AAA')&&boq.html.includes('การวิเคราะห์เปรียบเทียบภาพรวมทุกเจ้า'));
 assert.deepEqual(boqProgress,[{done:1,total:1,name:'compare.xlsx'}]);

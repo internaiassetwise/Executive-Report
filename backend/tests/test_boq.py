@@ -12,7 +12,9 @@ def workbook_bytes(book):
 
 
 def sheets_of(book):
-    return [{'name': ws.title, 'grid': [list(r) for r in ws.iter_rows(values_only=True)]} for ws in book.worksheets]
+    return [{'name': ws.title, 'grid': [list(r) for r in ws.iter_rows(values_only=True)],
+             'merges': [(m.min_row, m.min_col, m.max_row, m.max_col) for m in ws.merged_cells.ranges]}
+            for ws in book.worksheets]
 
 
 # Twelve benchmark lines. Vendor AAA prices material 2x the benchmark on the
@@ -54,11 +56,58 @@ def single_vendor_book(label_cell=None):
     return b
 
 
+def sparse_category_book():
+    """Categories may be merged, left blank on continuation rows, or placed
+    on a heading row immediately before their detail lines."""
+    b = openpyxl.Workbook(); s = b.active; s.title = 'BOQ'
+    s.append(['No', 'รายการ', 'หมวดงาน', 'ปริมาณ (ราคากลาง)', 'ปริมาณ',
+              'ราคาวัสดุ/หน่วย (ราคากลาง)', 'ราคาวัสดุ/หน่วย'])
+    s.append([1, 'Item 1', 'งานโครงสร้าง', 10, 10, 100, 120])
+    s.append([2, 'Item 2', None, 20, 20, 100, 100])
+    s.merge_cells('C2:C3')
+    s.append([3, 'Item 3', 'งานระบบ', 30, 30, 100, 100])
+    s.append([4, 'Item 4', None, 40, 40, 100, 100])
+    s.append([None, 'หัวหมวด', 'งานสถาปัตยกรรม', None, None, None, None])
+    s.append([5, 'Item 5', None, 50, 50, 100, 100])
+    return b
+
+
+def unlabelled_vendor_tabs_book():
+    b = openpyxl.Workbook(); b.remove(b.active)
+    for vendor in ('AAA', 'BBB'):
+        s = b.create_sheet(vendor)
+        s.append(['No', 'รายการ', 'ปริมาณ (ราคากลาง)', 'ปริมาณ',
+                  'ราคาวัสดุ/หน่วย (ราคากลาง)', 'ราคาวัสดุ/หน่วย'])
+        for i in range(1, 13):
+            s.append([i, f'Item {i}', i * 10, i * 10, 100, 110])
+    return b
+
+
+def one_category_book(category):
+    b = openpyxl.Workbook(); s = b.active; s.title = 'BOQ'
+    s.append(['รายการ', 'หมวดงาน', 'ปริมาณ (ราคากลาง)', 'ปริมาณ',
+              'ราคาวัสดุ/หน่วย (ราคากลาง)', 'ราคาวัสดุ/หน่วย'])
+    s.append(['Item', category, 10, 10, 100, 100])
+    return b
+
+
+def merged_header_book():
+    b = openpyxl.Workbook(); s = b.active; s.title = 'ST_A'
+    s.append(['รายการ', 'category', 'quantity benchmark', 'quantity',
+              'material benchmark', 'material'])
+    s.append([None, None, None, None, None, None])
+    s.merge_cells('B1:B2')
+    s.append(['Item', None, 10, 10, 100, 100])
+    return b
+
+
 class Detection(unittest.TestCase):
     def test_side_by_side_vendors_in_one_sheet(self):
         rep = B.build_many([(sheets_of(side_by_side_book()), 'compare.xlsx')])
         self.assertEqual([v['vendor'] for v in rep['vendors']], ['AAA', 'BBB'])
-        self.assertEqual(rep['groups'], ['AR', 'ST'])
+        self.assertEqual(rep['groups'], ['หมวด A', 'หมวด B'])
+        self.assertEqual(rep['categories'], ['หมวด A', 'หมวด B'])
+        self.assertFalse(rep['categories_missing'])
         self.assertEqual(rep['tolerance_source'], 'default')
         aaa, bbb = rep['vendors']
         self.assertEqual(aaa['benchmark'], 'RBP')
@@ -76,7 +125,7 @@ class Detection(unittest.TestCase):
         # Normalization is one-directional and priced from the unit rates.
         self.assertAlmostEqual(aaa['total']['savings'], 2 * 10.0 * 100.0, places=6)
         self.assertGreater(bbb['total']['savings'], 0)
-        self.assertEqual(len(rep['comparison']['quantity_over']['ST']), 2)
+        self.assertEqual(len(rep['comparison']['quantity_over']['หมวด A']), 2)
 
     def test_one_sheet_per_vendor(self):
         rep = B.build_many([(sheets_of(sheet_per_vendor_book()), 'tabs.xlsx')])
@@ -90,14 +139,45 @@ class Detection(unittest.TestCase):
     def test_single_unlabelled_vendor_is_named_from_the_file(self):
         rep = B.build_many([(sheets_of(single_vendor_book()), 'BOQ_Wisawapat.xlsx')])
         self.assertEqual(rep['vendors'][0]['vendor'], 'BOQ_Wisawapat')
+        self.assertEqual(rep['categories'], ['ST'])
+        self.assertEqual(rep['groups'], ['ST'])
         rep = B.build_many([(sheets_of(single_vendor_book('ผู้รับเหมา: วิศวพัฒน์ จำกัด')), 'x.xlsx')])
         self.assertEqual(rep['vendors'][0]['vendor'], 'วิศวพัฒน์ จำกัด')
         self.assertEqual(rep['vendors'][0]['benchmark'], 'ราคากลาง')
+
+    def test_merged_blank_and_heading_categories_keep_file_order(self):
+        rep = B.build_many([(sheets_of(sparse_category_book()), 'sparse.xlsx')])
+        expected = ['งานโครงสร้าง', 'งานระบบ', 'งานสถาปัตยกรรม']
+        self.assertEqual(rep['categories'], expected)
+        self.assertEqual(rep['groups'], expected)
+        self.assertEqual(rep['vendors'][0]['total']['benchmark_items'], 5)
+        self.assertFalse(rep['categories_missing'])
+
+    def test_vendor_tab_names_are_not_reported_as_categories(self):
+        rep = B.build_many([(sheets_of(unlabelled_vendor_tabs_book()), 'tabs.xlsx')])
+        self.assertEqual([v['vendor'] for v in rep['vendors']], ['AAA', 'BBB'])
+        self.assertEqual(rep['categories'], [])
+        self.assertTrue(rep['categories_missing'])
+        self.assertEqual(rep['groups'], [B.UNCATEGORIZED])
+        self.assertNotIn('AAA', rep['categories'])
+        self.assertNotIn('BBB', rep['categories'])
 
     def test_same_vendor_in_two_files_stays_distinguishable(self):
         rep = B.build_many([(sheets_of(single_vendor_book()), 'a.xlsx'), (sheets_of(single_vendor_book()), 'b.xlsx')])
         self.assertEqual(len(rep['vendors']), 2)
         self.assertNotEqual(rep['vendors'][0]['vendor'], rep['vendors'][1]['vendor'])
+
+    def test_category_order_is_preserved_across_uploaded_files(self):
+        rep = B.build_many([(sheets_of(one_category_book('งานภายนอก')), 'first.xlsx'),
+                            (sheets_of(one_category_book('งานโครงสร้าง')), 'second.xlsx')])
+        self.assertEqual(rep['categories'], ['งานภายนอก', 'งานโครงสร้าง'])
+        self.assertEqual(rep['groups'], rep['categories'])
+
+    def test_merged_header_is_not_used_as_a_category_value(self):
+        rep = B.build_many([(sheets_of(merged_header_book()), 'header.xlsx')])
+        self.assertEqual(rep['categories'], ['ST'])
+        self.assertEqual(rep['groups'], ['ST'])
+        self.assertNotIn('category', rep['categories'])
 
     def test_workbook_without_benchmark_columns_is_not_boq(self):
         b = openpyxl.Workbook(); s = b.active
@@ -113,6 +193,10 @@ class Dispatch(unittest.TestCase):
         self.assertEqual(out['mode'], 'boq')
         self.assertEqual(progress, [(1, 1, 'compare.xlsx')])
         html = out['html']
+        self.assertIn('หมวดงานที่พบในไฟล์', html)
+        self.assertIn('พบ 2 หมวด ตามลำดับที่ปรากฏในไฟล์อัปโหลด', html)
+        for category in out['report']['categories']:
+            self.assertIn(f'>{category}</td>', html)
         for heading in ('บทนำและขอบเขตการวิเคราะห์', 'ผู้เสนองาน: AAA', 'ผู้เสนองาน: BBB', 'ตารางที่ 1', 'ตารางที่ 2', 'ตารางที่ 3',
                         'การวิเคราะห์เชิงลึก', 'การวิเคราะห์เปรียบเทียบภาพรวมทุกเจ้า', 'Signature Pattern', 'บทวิเคราะห์เชิงกลยุทธ์',
                         'บทสรุปผู้บริหาร', 'Grand Total Project Cost'):
@@ -136,6 +220,13 @@ class Dispatch(unittest.TestCase):
         self.assertIn('ผู้เสนองาน: one', html)
         self.assertNotIn('การวิเคราะห์เปรียบเทียบภาพรวมทุกเจ้า', html)
         self.assertIn('บทสรุปผู้บริหาร', html)
+
+    def test_report_discloses_when_category_names_are_absent(self):
+        rep = B.build_many([(sheets_of(unlabelled_vendor_tabs_book()), 'tabs.xlsx')])
+        html = R.render(rep)
+        self.assertIn('ไม่พบชื่อหมวดงานในไฟล์', html)
+        self.assertNotIn('หมวดงาน 0 หมวด', html)
+        self.assertNotIn('หมวดงานตามที่พบในไฟล์</th>', html)
 
 
 if __name__ == '__main__':

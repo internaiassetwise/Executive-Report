@@ -9,6 +9,15 @@ const pct=(n:number|null|undefined)=>typeof n==='number'?`${n.toFixed(1)}%`:'—
 const signed=(n:number|null|undefined)=>typeof n==='number'?`${n>0?'+':''}${n.toFixed(1)}%`:'—';
 const source:Record<string,string>={inferred:'อ่านจากคอลัมน์ที่ไฟล์ปรับไว้เอง',declared:'กำหนดโดยผู้ใช้',default:'ค่าตั้งต้น ไม่พบคอลัมน์ที่ปรับไว้ในไฟล์'};
 
+function BoqCategoryList({categories,missing}:{categories:string[];missing:boolean}){
+ const found=categories??[];
+ return <section className="panel boq-category-panel">
+  <div className="boq-category-head"><div><span className="eyebrow">WORK CATEGORIES</span><h2>หมวดงานที่พบในไฟล์</h2><p>แสดงชื่อตามคอลัมน์หมวดงานหรือชื่อชีตในไฟล์อัปโหลด โดยไม่เติมชื่อจากภายนอก</p></div><span className="all-sheets-badge"><Check size={15}/>{num(found.length)} หมวด</span></div>
+  {found.length>0?<ol className="boq-category-list">{found.map((category,i)=><li key={category}><span>{String(i+1).padStart(2,'0')}</span><strong>{category}</strong></li>)}</ol>:<div className="boq-category-empty"><AlertCircle size={18}/><span>ไม่พบชื่อหมวดงานในไฟล์ ระบบจะไม่คาดเดาหรือเติมชื่อหมวดงานให้เอง</span></div>}
+  {missing&&found.length>0?<p className="boq-category-note">บางรายการไม่ได้ระบุหมวดงานในไฟล์ จึงแยกไว้เป็น “ไม่ระบุหมวดงานในไฟล์” ในตารางวิเคราะห์</p>:null}
+ </section>;
+}
+
 // Step 1 for BOQ uploads: what was detected, and the one input the report
 // takes from the user — the tolerance. Everything else comes from the files.
 export function BoqOverview({report,onBuild,busy}:{report:BoqReport;onBuild:(tolerance:number|null)=>void;busy:boolean}){
@@ -19,6 +28,7 @@ export function BoqOverview({report,onBuild,busy}:{report:BoqReport;onBuild:(tol
  return <div className="data-view">
   <div className="dataset-bar"><span className="file-icon"><FileSpreadsheet size={24}/></span><div><h2>BOQ เปรียบเทียบราคากลาง · {report.files.length} ไฟล์</h2><p>{report.files.join(' · ')}</p></div><span className="all-sheets-badge"><Check size={15}/>พบผู้เสนองาน {report.vendors.length} ราย</span></div>
   <div className="metric-grid">{[{label:'ผู้เสนองานที่ตรวจพบ',value:num(report.vendors.length),sub:report.vendors.map(v=>v.vendor).join(', ')},{label:'รายการในราคากลาง',value:num(items),sub:'รวมทุกเจ้า ทุกหมวดงาน'},{label:'ชีตที่ใช้คำนวณ',value:num(report.vendors.reduce((n,v)=>n+v.sheets_used.length,0)),sub:`ตัดชีตสรุปออก ${num(report.vendors.reduce((n,v)=>n+v.sheets_skipped.length,0))} ชีต`},{label:'เกณฑ์ที่ไฟล์ปรับไว้เอง',value:report.tolerance_source==='inferred'?pct(report.tolerance*100):'ไม่พบ',sub:source[report.tolerance_source]}].map(m=><div className="metric-card" key={m.label}><span>{m.label}</span><strong>{m.value}</strong><small>{m.sub}</small></div>)}</div>
+  <BoqCategoryList categories={report.categories} missing={report.categories_missing}/>
   {report.files_skipped.length>0&&<div className="alert warning"><AlertCircle size={20}/><div>{report.files_skipped.map(f=><p key={f.filename}>{f.filename}: {f.reason}</p>)}</div></div>}
   <div className="panel details-panel boq-vendors"><p className="table-caption">ชื่อผู้เสนองาน ราคากลาง และโครงการ อ่านจากหัวคอลัมน์และเซลล์ในไฟล์ · ไม่มีการเติมข้อมูลจากภายนอก</p>
    <Table><TableHeader><TableRow><TableHead>ผู้เสนองาน</TableHead><TableHead>ราคากลาง</TableHead><TableHead>โครงการ (ตามไฟล์)</TableHead><TableHead>ไฟล์</TableHead><TableHead>ชีตที่ใช้</TableHead><TableHead>รายการในราคากลาง</TableHead><TableHead>เกณฑ์ที่ไฟล์ปรับไว้</TableHead></TableRow></TableHeader>
@@ -41,6 +51,7 @@ export function BoqSummary({report,onReport,onBack}:{report:BoqReport;onReport:(
  return <div className="results-view">
   <div className="result-banner"><div><span className="success-label"><Check size={14}/>คำนวณครบทุกเจ้าแล้ว · เกณฑ์ {pct(report.tolerance*100)}</span><h2>ผู้เสนองาน {report.vendors.length} ราย · {report.vendors.map(v=>v.vendor).join(', ')}</h2><p>{E.summary}</p></div><button className="primary-button" onClick={onReport}>ดูรายงาน <ArrowRight size={17}/></button></div>
   <div className="metric-grid boq-cards">{E.rows.map(r=><div className="metric-card" key={r.vendor}><span>{r.vendor}</span><strong>{pct(r.savings_pct)}</strong><small>ประหยัดได้ {num(r.savings)} บาท จาก {num(r.original)}</small></div>)}</div>
+  <BoqCategoryList categories={report.categories} missing={report.categories_missing}/>
   <section className="panel executive-panel"><span className="eyebrow">SIGNATURE PATTERN</span><h2>สรุปแนวโน้มเฉพาะตัวของแต่ละเจ้า</h2>
    <Table><TableHeader><TableRow><TableHead>ผู้เสนองาน</TableHead><TableHead>แนวโน้มเด่น</TableHead><TableHead>หมวดงานที่กระทบมากที่สุด</TableHead><TableHead>ค่าแรง % ต่าง</TableHead><TableHead>ค่าของ % ต่าง</TableHead><TableHead>ปริมาณเกิน</TableHead></TableRow></TableHeader>
    <TableBody>{report.vendors.map(v=>{const s=report.signatures.find(x=>x.vendor===v.vendor);return <TableRow key={v.vendor}><TableCell><b>{v.vendor}</b></TableCell><TableCell>{s?.pattern}</TableCell><TableCell>{s?.top_groups}</TableCell><TableCell>{signed(v.total.labour_dev_pct as number|null)}</TableCell><TableCell>{signed(v.total.material_dev_pct as number|null)}</TableCell><TableCell>{num(v.total.quantity_over as number)} ({pct(v.total.quantity_over_pct as number|null)})</TableCell></TableRow>;})}</TableBody></Table>

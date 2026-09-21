@@ -151,4 +151,58 @@ class WorkbookPipelineTests(unittest.TestCase):
         self.assertTrue(any(r['source']['sheet']=='Wide' and r['type']=='statistics' for r in report['analyses']))
         self.assert_evidence(report)
 
+class AIPlanTests(unittest.TestCase):
+    def test_ambiguous_totals_are_quality_only_in_automatic_flow(self):
+        p=e.dispatch('inspect_files',{'files':[{'filename':'ambiguous.csv','bytes':b'Item,Amount\nA,10\nB,20\nTotal,999\n'}]})
+        self.assertEqual({o['type'] for o in p['tables'][0]['opportunities']},{'quality'})
+        self.assertTrue(any(i['kind']=='ambiguous_scope' for i in p['tables'][0]['quality']['issues']))
+        self.assertTrue(p['notes'])
+
+    def test_unified_ingestion_accepts_boq_and_csv_without_matching(self):
+        book=base_book();sh=book.active
+        sh.append(['No','รายการ','ปริมาณ RBP','ปริมาณ AAA เสนอ','ราคาของ RBP','ราคาของ AAA เสนอ'])
+        for i in range(12):sh.append([i+1,f'Item {i}',10+i,11+i,100,120+i])
+        from unittest.mock import patch
+        files=[{'filename':'boq.xlsx','bytes':workbook_bytes(book)},{'filename':'other.csv','bytes':b'Team,Amount\nA,10\nB,20\n'}]
+        with patch.object(e,'boq',side_effect=AssertionError('Must not auto-route BOQ')):
+            profile=e.dispatch('inspect_files',{'files':files})
+        self.assertEqual(profile['sheets_count'],2)
+        self.assertEqual(len({t['id'] for t in profile['tables']}),profile['tables_count'])
+        self.assertTrue(any('boq.xlsx' in t['sheet'] for t in profile['tables']))
+        self.assertNotIn('mode',profile)
+        report=e.dispatch('analyze_workbook',{})
+        self.assertNotIn('vendors',report)
+        self.assertTrue(any('other.csv' in r['source']['sheet'] for r in report['analyses']))
+        with self.assertRaises(ValueError):e.dispatch('inspect_files',{'files':[files[0],{'filename':'empty.csv','bytes':b''}]})
+        self.assertFalse(e.TABLES);self.assertFalse(e.WORKBOOK)
+
+    def test_planning_context_covers_tail_groups_dates_and_outliers(self):
+        lines=['Date,Team,Amount']
+        for i in range(100):lines.append(f"2026-{1 if i<90 else 12:02d}-01,{'A' if i<90 else 'B'},{1000 if i==99 else 10+i%10}")
+        book=inspect_csv('\n'.join(lines));t=book['tables'][0];c=t['planning_context']
+        self.assertEqual(c['rows_scanned'],100)
+        self.assertLessEqual(len(c['samples']),60)
+        self.assertIn(101,[s['row'] for s in c['samples']])
+        groups=next(x for x in c['columns'] if x['name']=='Team')
+        self.assertEqual({x['label']:x['count'] for x in groups['groups']},{'A':90,'B':10})
+        dates=next(x for x in c['columns'] if x['name']=='Date')
+        self.assertEqual(dates['end'],'2026-12-01')
+        metric=next(x for x in c['columns'] if x['name']=='Amount')
+        self.assertEqual(metric['outlier_count'],1)
+        self.assertEqual(metric['outlier_examples'][0]['row'],101)
+        self.assertEqual(c,e.planning_context(e.TABLES[t['id']]))
+
+    def test_selects_exact_plans_and_rejects_forgery(self):
+        profile=inspect_csv('Team,Amount\nA,10\nB,20\nA,30\nB,40\n')
+        table=profile['tables'][0]
+        selected=next(p for p in table['opportunities'] if p['type']=='statistics')
+        report=e.dispatch('analyze_workbook',{'selected_plans':[{'table_id':table['id'],'analysis_id':selected['id']}]})
+        self.assertEqual({a['type'] for a in report['analyses']},{'quality','statistics'})
+        self.assertEqual(next(a['data']['mean'] for a in report['analyses'] if a['type']=='statistics'),25)
+        shared={'table_id':table['id'],'analysis_id':selected['id']}
+        reused=e.dispatch('analyze_workbook',{'selected_plans':[shared,shared]})
+        self.assertEqual(sum(a['id']==selected['id'] for a in reused['analyses']),1)
+        with self.assertRaises(ValueError):e.dispatch('analyze_workbook',{'selected_plans':[{'table_id':'forged','analysis_id':selected['id']}]})
+        with self.assertRaises(ValueError):e.dispatch('analyze_workbook',{'selected_plans':[]})
+
 if __name__=='__main__':unittest.main(verbosity=2)

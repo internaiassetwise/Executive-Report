@@ -1,35 +1,34 @@
 'use client';
-import {useState,useEffect,useRef,useMemo} from 'react';
-import {ArrowUpRight,ChartNoAxesCombined,FileSpreadsheet,FileText,Layers3,ShieldCheck,Upload,ChevronRight,ArrowRight,ArrowLeft,Check,AlertCircle,Download,LoaderCircle,Sparkles,RotateCcw,Database,Info,X} from 'lucide-react';
-import {Progress,ProgressLabel,ProgressValue} from '@/components/ui/progress';
-import {AnalysisChart} from '@/components/analysis-chart';
+import {useState,useEffect,useRef} from 'react';
+import {ArrowRight,FileSpreadsheet,FileText,ShieldCheck,Upload,Check,AlertCircle,Download,LoaderCircle,RotateCcw,Database,Info,X} from 'lucide-react';
 import {ReportView} from '@/components/report-view';
+import {BoqReportFrame} from '@/components/boq-view';
 import {WorkbookOverview} from '@/components/workbook-overview';
-import {BoqOverview,BoqSummary,BoqReportFrame} from '@/components/boq-view';
-import {evidenceBatches} from '@/lib/interpretation';
+import {writeNarrative} from '@/lib/report-writer';
+import {planAndCalculate} from '@/lib/planned-analysis';
+import {clearAIJobs} from '@/lib/ai-jobs';
 import {runAnalysis,cancelAnalysis} from '@/lib/analysis-client';
-import type {WorkbookProfile,Report,BoqResult,BoqReport} from '@/lib/models';
+import type {WorkbookProfile,Report,BoqReport,BoqResult} from '@/lib/models';
 
-const steps=['อัปโหลดข้อมูล','ทำความเข้าใจข้อมูล','วิเคราะห์ข้อมูล','สร้างรายงาน'];
-const navs=['การวิเคราะห์ใหม่','ชุดข้อมูล','ผลการวิเคราะห์','รายงาน'];
-const icons=[Layers3,FileSpreadsheet,ChartNoAxesCombined,FileText];
-const num=(n:unknown)=>typeof n==='number'?n.toLocaleString('th-TH',{maximumFractionDigits:2}):String(n??'—');
+const steps=['อัปโหลดข้อมูล','ประมวลผลและวิเคราะห์','รายงาน'];
 function download(value:unknown,name:string){const blob=new Blob([JSON.stringify(value,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 
 export default function Home(){
- const [step,setStep]=useState(0),[book,setBook]=useState<WorkbookProfile|null>(null),[selected,setSelected]=useState<string[]>([]),[report,setReport]=useState<Report|null>(null),[objective,setObjective]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(''),[progress,setProgress]=useState(0),[error,setError]=useState(''),[drag,setDrag]=useState(false),[aiReady,setAiReady]=useState(false),[aiBusy,setAiBusy]=useState(false),[isDemo,setIsDemo]=useState(false),[notice,setNotice]=useState('');
- const [resultsPage,setResultsPage]=useState(0),[aiProgress,setAiProgress]=useState('');
- // BOQ comparison mode: set when the upload carries proposal-vs-benchmark
- // columns. The generic path (book/report) stays untouched otherwise.
- const [boq,setBoq]=useState<{report:BoqReport;html:string}|null>(null),[files,setFiles]=useState<string[]>([]);
+ const [step,setStep]=useState(0),[book,setBook]=useState<WorkbookProfile|null>(null),[selected,setSelected]=useState<string[]>([]),[report,setReport]=useState<Report|null>(null),[boq,setBoq]=useState<{report:BoqReport;html:string}|null>(null),[flowKind,setFlowKind]=useState<'generic'|'boq'|null>(null),[objective,setObjective]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(''),[error,setError]=useState(''),[drag,setDrag]=useState(false),[isDemo,setIsDemo]=useState(false),[notice,setNotice]=useState('');
+ const [pendingFiles,setPendingFiles]=useState<File[]>([]);
+ const [phase,setPhase]=useState(0);
+ const heading=useRef<HTMLHeadingElement|null>(null);
+ useEffect(()=>{heading.current?.focus();},[step]);
+ const [files,setFiles]=useState<string[]>([]);
  const operation=useRef(0);
- const aiRunning=useRef(false);
- const pageSize=12;
- const aiBatchCount=useMemo(()=>{try{return report?evidenceBatches(report.evidence,objective).length:0;}catch{return 0;}},[report,objective]);
+ const writing=useRef<AbortController|null>(null);
+ const calculated=useRef<{report:Report}|null>(null);
+ const calculatedBoq=useRef<{report:BoqReport}|null>(null);
+
  const actions=useRef<{getState:()=>unknown;sample:()=>Promise<unknown>}>({getState:()=>({}),sample:async()=>({})});
- function updateProgress(message:string,value:number){setLoading(message);setProgress(value);}
- async function upload(input:File|File[],demo=false){
-  if(busy||aiRunning.current)return;
+ function updateProgress(message:string,value:number){setLoading(message);if(value>=65)setPhase(previous=>previous===0?1:previous);}
+ async function processFiles(input:File|File[],demo=false){
+  if(busy)return;
   const list=Array.isArray(input)?input:[input];
   setError('');setNotice('');
   if(!list.length)return;
@@ -38,71 +37,101 @@ export default function Home(){
    if(file.size>15*1024*1024){setError(`${file.name}: ไฟล์ใหญ่กว่า 15 MB กรุณาแบ่งไฟล์ก่อนอัปโหลด`);return;}
   }
   const current=++operation.current;
-  setBusy(true);setProgress(5);setLoading(list.length>1?`กำลังอ่าน ${list.length} ไฟล์…`:'กำลังอ่านไฟล์…');setBook(null);setReport(null);setBoq(null);setFiles(list.map(f=>f.name));setStep(0);setIsDemo(demo);
+  calculated.current=null;calculatedBoq.current=null;
+  setBusy(true);setLoading(list.length>1?`กำลังอ่าน ${list.length} ไฟล์…`:'กำลังอ่านไฟล์…');setBook(null);setReport(null);setBoq(null);setFlowKind(null);setFiles(list.map(f=>f.name));setPhase(0);setStep(1);setIsDemo(demo);
   try{
    const payload=await Promise.all(list.map(async f=>({filename:f.name,bytes:await f.arrayBuffer()})));
    if(current!==operation.current)return;
-   // Spreadsheets are probed for proposal-vs-benchmark columns first; a single
-   // workbook without them is inspected generically in the same call, so the
-   // file is read once. CSV can only be generic.
-   const spreadsheet=list.every(f=>/\.(xlsx|xls)$/i.test(f.name));
-   if(spreadsheet){
-    const result=await runAnalysis<BoqResult>('boq',{files:payload},updateProgress);
-    if(current!==operation.current)return;
-    if(result.mode==='boq'){setBoq({report:result.report,html:result.html});setStep(1);return {vendors:result.report.vendors.map(v=>v.vendor)};}
-    if(result.mode==='none'){setError('หลายไฟล์รองรับเฉพาะ BOQ ที่มีคอลัมน์เปรียบเทียบผู้เสนอราคากับราคากลาง · ไม่พบโครงสร้างนั้นในไฟล์ที่เลือก');return;}
-    setBook(result.book);setSelected(result.book.opportunities.map(p=>p.type));setStep(1);return {tables:result.book.tables_count,rows:result.book.rows_count};
+   const result=await runAnalysis<BoqResult>('boq',{files:payload},updateProgress);
+   if(current!==operation.current)return;
+   if(result.mode==='boq'){
+    setFlowKind('boq');calculatedBoq.current={report:result.report};await finishBoq(result.report,current);return {mode:'boq',vendors:result.report.vendors.length};
    }
-   if(list.length>1){setError('อัปโหลดหลายไฟล์ได้เฉพาะ .xlsx/.xls ที่เป็น BOQ เปรียบเทียบราคากลาง');return;}
-   const result=await runAnalysis<WorkbookProfile>('inspect',payload[0],updateProgress);if(current!==operation.current)return;setBook(result);setSelected(result.opportunities.map(p=>p.type));setStep(1);return {tables:result.tables_count,rows:result.rows_count};
+   if(result.mode==='generic'){
+    setFlowKind('generic');setBook(result.book);setSelected(result.book.opportunities.map(p=>p.type));await finishGeneric(result.book,current);return {mode:'generic',tables:result.book.tables_count,rows:result.book.rows_count};
+   }
+   throw new Error('ไม่พบโครงสร้างข้อมูลที่รองรับในไฟล์ที่อัปโหลด');
   }
-  catch(e){if(current!==operation.current)return;setError(e instanceof Error?e.message:'อ่านไฟล์ไม่สำเร็จ');throw e;}
+  catch(e){if(current!==operation.current)return;setError(e instanceof Error?e.message:'อ่านไฟล์ไม่สำเร็จ');setStep(calculated.current||calculatedBoq.current?1:0);}
   finally{if(current===operation.current)setBusy(false);}
  }
- // Re-aggregate at a user-declared tolerance; the files stay loaded in the
- // worker so nothing is re-read.
- async function buildBoq(tolerance:number|null){
-  if(!boq||busy)return;const current=++operation.current;
-  setBusy(true);setError('');setProgress(10);setLoading('กำลังคำนวณใหม่ตามเกณฑ์ที่กำหนด…');
-  try{const result=await runAnalysis<BoqResult>('boq_rebuild',{tolerance},updateProgress);if(current!==operation.current)return;if(result.mode!=='boq')throw new Error('สร้างรายงานไม่สำเร็จ');setBoq({report:result.report,html:result.html});setStep(2);}
-  catch(e){if(current===operation.current)setError(e instanceof Error?e.message:'สร้างรายงานไม่สำเร็จ');}
-  finally{if(current===operation.current)setBusy(false);}
+ function upload(input:File|File[],demo=false){
+  const list=Array.isArray(input)?input:[input];if(busy||!list.length)return;
+  const invalid=list.find(f=>! /\.(xlsx|xls|csv)$/i.test(f.name)||f.size>15*1024*1024);
+  if(invalid){setError(`${invalid.name}: รองรับ Excel/CSV ขนาดไม่เกิน 15 MB ต่อไฟล์`);return;}
+  clearAIJobs();setPendingFiles(list);setIsDemo(demo);setError('');setNotice('');
  }
  async function sample(){const response=await fetch('/sample-data.csv');if(!response.ok)throw new Error('เปิดข้อมูลตัวอย่างไม่สำเร็จ');return upload(new File([await response.text()],'sample-data.csv',{type:'text/csv'}),true);}
- async function analyze(){if(!book||busy||aiBusy)return;const current=++operation.current;setBusy(true);setError('');setProgress(5);setLoading('กำลังเตรียมการวิเคราะห์…');try{const r=await runAnalysis<Report>('analyze_workbook',{selected_types:selected,objective},updateProgress);if(current!==operation.current)return;setReport(r);setResultsPage(0);setStep(2);}catch(e){if(current===operation.current)setError(e instanceof Error?e.message:'วิเคราะห์ไม่สำเร็จ');}finally{if(current===operation.current)setBusy(false);}}
- function reset(){operation.current++;cancelAnalysis();setBusy(false);setStep(0);setBook(null);setSelected([]);setReport(null);setBoq(null);setFiles([]);setObjective('');setError('');setNotice('');setIsDemo(false);}
- async function ai(){
-  if(!report||aiRunning.current)return;
-  const current=operation.current;
-  aiRunning.current=true;
-  setAiBusy(true);setError('');
+ async function analyze(){if(!book||busy)return;calculated.current=null;const current=++operation.current;setBusy(true);setStep(1);setPhase(1);setError('');setNotice('');setLoading('กำลังเตรียมการวิเคราะห์…');try{await finishGeneric(book,current,selected);}catch(e){if(current===operation.current){setError(e instanceof Error?e.message:'วิเคราะห์ไม่สำเร็จ');setStep(1);}}finally{if(current===operation.current)setBusy(false);}}
+ function reset(){clearAIJobs();calculated.current=null;calculatedBoq.current=null;operation.current++;writing.current?.abort();cancelAnalysis();setBusy(false);setStep(0);setBook(null);setSelected([]);setReport(null);setBoq(null);setFlowKind(null);setFiles([]);setObjective('');setError('');setNotice('');setIsDemo(false);setPendingFiles([]);}
+ async function compose(r:Report):Promise<Report>{
+  setPhase(2);setLoading('กำลังเรียบเรียงรายงาน…');writing.current?.abort();const controller=new AbortController();writing.current=controller;
+  return await writeNarrative(r,objective,controller.signal,updateProgress);
+ }
+ async function finishGeneric(profile:WorkbookProfile,current:number,types=profile.opportunities.map(p=>p.type)){
+  setPhase(1);
+  setLoading('AI กำลังทำความเข้าใจข้อมูลและเลือกประเด็นวิเคราะห์…');
+  writing.current?.abort();const controller=new AbortController();writing.current=controller;
+  const computed=await planAndCalculate(profile,objective,controller.signal,
+   selected_plans=>runAnalysis<Report>('analyze_workbook',{selected_plans,objective},updateProgress),types,updateProgress);
+  if(current!==operation.current)return;calculated.current={report:computed};const r=await compose(computed);
+  if(current!==operation.current)return;setReport(r);setStep(2);
+ }
+ async function finishBoq(base:BoqReport,current:number){
+  setPhase(2);setLoading('AI กำลังเรียบเรียงบทวิเคราะห์ BOQ…');
+  writing.current?.abort();const controller=new AbortController();writing.current=controller;
+  const written=await writeNarrative(base,objective,controller.signal,updateProgress);
+  if(current!==operation.current)return;calculatedBoq.current={report:written};setLoading('กำลังจัดหน้ารายงาน BOQ…');
+  const html=await runAnalysis<string>('boq_render',{report:written},updateProgress);
+  if(current!==operation.current)return;setBoq({report:written,html});setStep(2);
+ }
+ async function retryWriting(){
+  const saved=calculated.current,savedBoq=calculatedBoq.current;if((!saved&&!book&&!savedBoq)||busy)return;const current=++operation.current;
+  setBusy(true);setError('');setStep(1);
   try{
-   const batches=evidenceBatches(report.evidence,objective);
-   const insights:NonNullable<Report['ai']>=[];
-   for(let i=0;i<batches.length;i++){
-    if(current!==operation.current)return;
-    setAiProgress(`กำลังตีความชุด ${i+1} / ${batches.length}`);
-    const response=await fetch('/api/interpret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({evidence:batches[i],objective})});
-    const result=await response.json() as {error?:string;insights:NonNullable<Report['ai']>};
-    if(!response.ok)throw new Error(`ชุด ${i+1} / ${batches.length}: ${result.error||'ไม่สามารถสร้างคำตีความได้'} ยังไม่ได้บันทึกคำตีความรอบนี้`);
-    insights.push(...result.insights);
-   }
-   if(current===operation.current){setReport({...report,ai:insights});setNotice('เพิ่มคำตีความจาก Gemini ครบทุกชุดหลักฐานในรายงานแล้ว');}
-  }catch(e){if(current===operation.current)setError(e instanceof Error?e.message:'เชื่อมต่อ Gemini ไม่สำเร็จ');}
-  finally{aiRunning.current=false;setAiBusy(false);setAiProgress('');}
+   if(savedBoq)await finishBoq(savedBoq.report,current);
+   else if((!saved||saved.report.plan?.processing?.partial)&&book)await finishGeneric(book,current,selected);
+   else if(saved){const r=await compose(saved.report);if(current===operation.current){setReport(r);setStep(2);}}
+  }catch(e){if(current===operation.current)setError(e instanceof Error?e.message:'เขียนรายงานไม่สำเร็จ');}
+  finally{if(current===operation.current)setBusy(false);}
  }
  async function print(){setNotice('เลือก “บันทึกเป็น PDF” ในหน้าต่างพิมพ์ และใช้กระดาษ A4');await document.fonts.ready;window.print();}
- useEffect(()=>{fetch('/api/interpret').then(r=>r.json() as Promise<{configured:boolean}>).then(d=>setAiReady(d.configured===true)).catch(()=>{});return()=>cancelAnalysis();},[]);
- actions.current={getState:()=>({step:steps[step],filename:book?.filename||null,files,tables:book?.tables.map(t=>({id:t.id,name:t.name,rows:t.rows_count})),selected,report:report?{findings:report.executive_summary,evidence:report.evidence}:null,boq:boq?{tolerance:boq.report.tolerance,vendors:boq.report.executive.rows,headline:boq.report.executive.headline}:null,busy}),sample};
+ useEffect(()=>()=>{writing.current?.abort();cancelAnalysis();},[]);
+ actions.current={getState:()=>({step:steps[step],mode:flowKind,filename:book?.filename||null,files,tables:book?.tables.map(t=>({id:t.id,name:t.name,rows:t.rows_count})),selected,report:report?{findings:report.executive_summary,evidence:report.evidence}:boq?{vendors:boq.report.vendors.map(v=>v.vendor),executive:boq.report.executive}:null,busy}),sample};
  useEffect(()=>{const context=(document as any).modelContext;if(!context?.registerTool)return;const lifecycle=new AbortController();const tools=[{name:'read_analysis_workspace',title:'Read analysis workspace',description:'Read current dataset, selected analyses and calculated findings.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:true},execute:(input:unknown)=>{if(!input||typeof input!=='object'||Object.keys(input).length)throw new Error('Expected empty object');return actions.current.getState();}},{name:'load_sample_dataset',title:'Load sample dataset',description:'Replace the current local dataset with synthetic demonstration data and inspect it.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute:async(input:unknown)=>{if(!input||typeof input!=='object'||Object.keys(input).length)throw new Error('Expected empty object');return actions.current.sample();}}];for(const tool of tools){try{Promise.resolve(context.registerTool(tool,{signal:lifecycle.signal})).catch(()=>{});}catch{}}return()=>lifecycle.abort();},[]);
- const uploadSafe=(input:File|File[])=>void upload(input).catch(()=>{});
- return <div className="app-shell"><aside className="side no-print"><a href="/" className="brand" aria-label="AssetWise Data Insight"><img src="/asw-logo_horizontal.svg" alt="AssetWise"/></a></aside><div className="workspace"><header className="topbar no-print"><div className="topbar-context">Workspace <ChevronRight size={14} aria-hidden="true"/><b>{navs[step]}</b></div><nav className="top-nav" aria-label="เมนูหลัก">{navs.map((t,i)=>{const Icon=icons[i];return <button type="button" className={'top-nav-item '+(step===i?'active':'')} key={t} aria-label={t} aria-current={step===i?'step':undefined} disabled={busy||aiBusy||(i===1&&!book&&!boq)||(i>1&&!report&&!boq)} onClick={()=>setStep(i)}><Icon size={18} aria-hidden="true"/><span className="top-nav-label">{t}</span>{i===0&&<span className="nav-plus" aria-hidden="true">＋</span>}</button>;})}</nav></header><main className="main"><div className="heading no-print"><div><p className="eyebrow">A CLEARER VIEW OF YOUR DATA</p><h1>{['เริ่มต้นจากข้อมูล ไปสู่การตัดสินใจ','ทำความเข้าใจ ก่อนเริ่มวิเคราะห์','ข้อค้นพบที่มีข้อมูลรองรับ','รายงานที่พร้อมส่งต่อ'][step]}</h1><p className="subtitle">{step===0?'อัปโหลด Excel ค้นพบสิ่งสำคัญ และเปลี่ยนเป็นรายงานที่พร้อมใช้งาน':boq?files.join(' · '):book?.filename}{isDemo&&step>0&&<span className="demo-badge">ข้อมูลสมมติสำหรับทดลอง</span>}</p></div>{step>0?<button className="secondary-button" onClick={reset} disabled={busy||aiBusy}><RotateCcw size={15}/>เริ่มใหม่</button>:<span className="outline-label"><ShieldCheck size={15}/>ประมวลผลบนอุปกรณ์</span>}</div><div className="stepper no-print">{steps.map((s,i)=><button key={s} className={'step '+(step===i?'current':'')+(step>i?' done':'')} disabled={busy||aiBusy||(i===1&&!book&&!boq)||(i>1&&!report&&!boq)} onClick={()=>setStep(i)}><span>{step>i?<Check size={13}/>:String(i+1).padStart(2,'0')}</span><b>{s}</b>{i<3&&<ChevronRight size={17}/>}</button>)}</div>{error&&<div role="alert" className="alert error no-print"><AlertCircle size={19}/><span>{error}</span><button onClick={()=>setError('')} aria-label="ปิดข้อความ"><X size={16}/></button></div>}{notice&&<div role="status" className="alert info no-print"><Info size={18}/><span>{notice}</span></div>}{busy&&<div className="panel loading-panel no-print" role="status"><LoaderCircle className="spin" size={31}/><h2>{loading}</h2><p>ครั้งแรกอาจใช้เวลาสักครู่เพื่อโหลดเครื่องมือ · ข้อมูลยังอยู่บนอุปกรณ์ของคุณ</p><Progress value={progress}><ProgressLabel>กำลังประมวลผล</ProgressLabel><ProgressValue/></Progress><button className="text-button" onClick={()=>{operation.current++;cancelAnalysis();setBusy(false);setBook(null);setReport(null);setStep(0);}}>ยกเลิก</button></div>}
- {step===0&&!busy&&<><div className="upload-layout"><section className="panel upload-panel"><div className="panel-head"><div><h2>เพิ่มชุดข้อมูลของคุณ</h2><p>ทุกข้อมูลมีเรื่องราว เริ่มค้นหาจากไฟล์ของคุณ</p></div><span className="small-index">01 / UPLOAD</span></div><label className={'dropzone '+(drag?'dragging':'')} onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);const f=Array.from(e.dataTransfer.files);if(f.length)uploadSafe(f);}}><input type="file" multiple accept=".xlsx,.xls,.csv" aria-label="เลือกไฟล์ Excel หรือ CSV" onChange={e=>{const f=Array.from(e.target.files??[]);if(f.length)uploadSafe(f);e.target.value='';}}/><span className="upload-symbol"><Upload size={27}/></span><h3>ลากไฟล์ Excel มาวางที่นี่</h3><p>หรือเลือกไฟล์จากอุปกรณ์ของคุณ · เลือกหลายไฟล์ได้เมื่อเป็น BOQ เทียบราคากลาง</p><span className="primary-button">เลือกไฟล์ <ArrowRight size={17}/></span><small>.XLSX, .XLS, .CSV · สูงสุด 15 MB ต่อไฟล์</small></label><div className="sample-line"><span><FileSpreadsheet size={18}/>ยังไม่มีไฟล์ที่พร้อมใช้งาน?</span><button onClick={()=>void sample().catch(e=>setError(e.message))}>ลองใช้ข้อมูลตัวอย่าง <ArrowUpRight size={15}/></button></div></section></div><div className="section-heading"><h2>จากสเปรดชีต สู่ความเข้าใจ</h2><span>ONE CONNECTED WORKFLOW</span></div><div className="feature-grid">{[{Icon:Layers3,title:'เข้าใจข้อมูลอัตโนมัติ',desc:'ค้นหาตาราง แยกประเภทคอลัมน์ และตรวจสอบคุณภาพข้อมูล'},{Icon:ChartNoAxesCombined,title:'เลือกสิ่งที่ควรวิเคราะห์',desc:'แนะนำการวิเคราะห์ที่เหมาะกับข้อมูล พร้อมให้คุณปรับเลือก'},{Icon:FileText,title:'รายงานที่พร้อมตัดสินใจ',desc:'สรุปข้อค้นพบ พร้อมหลักฐาน กราฟ และรายงาน PDF'}].map(({Icon,title,desc},i)=><div className="feature" key={title}><span className="feature-icon"><Icon size={20}/></span><div><h3>{title}</h3><p>{desc}</p></div><small>0{i+1}</small></div>)}</div></>}
- {step===1&&boq&&!busy&&<BoqOverview report={boq.report} busy={busy} onBuild={t=>void buildBoq(t)}/>}
- {step===2&&boq&&!busy&&<BoqSummary report={boq.report} onReport={()=>setStep(3)} onBack={()=>setStep(1)}/>}
- {step===3&&boq&&!busy&&<BoqReportFrame report={boq.report} html={boq.html} onNotice={setNotice}/>}
- {step===1&&book&&!boq&&!busy&&<WorkbookOverview book={book} selected={selected} onSelected={v=>{setSelected(v);setReport(null);}} objective={objective} onObjective={v=>{setObjective(v);setReport(null);}} onAnalyze={analyze}/>}
- {step===2&&report&&!busy&&<div className="results-view"><div className="result-banner"><div><span className="success-label"><Check size={14}/>{report.errors?.length?'วิเคราะห์เสร็จแล้ว มีรายการที่ต้องตรวจสอบ':'วิเคราะห์ครบทุกตารางแล้ว'}</span><h2>{report.metadata.table}</h2><p>{report.analyses.length} การวิเคราะห์ · {report.evidence.length} หลักฐานที่ตรวจสอบได้</p></div><button className="primary-button" onClick={()=>setStep(3)}>ดูรายงาน <ArrowRight size={17}/></button></div><section className="panel executive-panel"><span className="eyebrow">EXECUTIVE SNAPSHOT</span><h2>สิ่งสำคัญจากข้อมูลของคุณ</h2><ul>{report.executive_summary.map((s,i)=><li key={i}><span>0{i+1}</span>{s}</li>)}</ul></section>{!!report.errors?.length&&<div className="alert warning"><AlertCircle size={18}/><div><p>คำนวณไม่สำเร็จ {report.errors.length} รายการ ผลที่สำเร็จยังอยู่ครบ</p>{report.errors.map(e=><p key={e.analysis_id}>{e.source.sheet}!{e.source.range} · {e.title}: {e.message}</p>)}</div></div>}<div className="results-grid">{report.analyses.slice(resultsPage*pageSize,(resultsPage+1)*pageSize).map(r=><section className="panel result-card" key={r.id}><div className="result-card-head"><h3>{r.title}</h3><span className="evidence-chip">{r.evidence_id}</span></div><p className="result-source">{r.source?.sheet}!{r.source?.range} · {r.source?.table_id}</p><p className="finding">{r.finding}</p>{r.chart?<AnalysisChart result={r}/>:<div className="stat-values">{Object.entries(r.data).filter(([,v])=>typeof v==='number').slice(0,6).map(([k,v])=><div key={k}><span>{({count:'จำนวน',mean:'ค่าเฉลี่ย',median:'มัธยฐาน',min:'ต่ำสุด',max:'สูงสุด',std:'ส่วนเบี่ยงเบน',lower:'ขอบเขตล่าง',upper:'ขอบเขตบน',missing:'ค่าว่าง',completeness:'ครบถ้วน (%)',duplicates:'แถวซ้ำ',sample_size:'จำนวนตัวอย่าง'} as Record<string,string>)[k]||k}</span><strong>{num(v)}</strong></div>)}</div>}<details className="evidence-detail"><summary>ดูหลักฐานและวิธีคำนวณ</summary><p>{r.method}</p><p>ที่มา: {r.source?.sheet??report.dataset_overview.sheet}!{r.source?.range??report.dataset_overview.range}</p><pre>{JSON.stringify(r.data,null,2)}</pre></details></section>)}</div>{report.analyses.length>pageSize&&<div className="results-pagination"><button className="secondary-button" disabled={resultsPage===0} onClick={()=>setResultsPage(p=>p-1)}>ก่อนหน้า</button><span>แสดง {resultsPage*pageSize+1}–{Math.min((resultsPage+1)*pageSize,report.analyses.length)} จาก {num(report.analyses.length)} ผลลัพธ์ · รายงานรวมครบทุกผลลัพธ์</span><button className="secondary-button" disabled={(resultsPage+1)*pageSize>=report.analyses.length} onClick={()=>setResultsPage(p=>p+1)}>ถัดไป</button></div>}<section className="panel ai-panel"><span className="feature-icon"><Sparkles size={21}/></span><div><h3>เพิ่มมุมมองจาก Gemini</h3><p>{aiReady?`ส่งข้อค้นพบทุกตารางพร้อมที่มาและวัตถุประสงค์ · แบ่งเป็น ${aiBatchCount} คำขอ`:'ยังไม่ได้เชื่อมต่อ Gemini · คุณสามารถใช้ผลคำนวณและสร้างรายงานได้ทันที'}</p><small>คำตีความแยกจากข้อเท็จจริง ไม่มีการส่งไฟล์หรือข้อมูลดิบให้ Gemini</small></div><button className="secondary-button" disabled={!aiReady||aiBusy} onClick={ai}>{aiBusy?<LoaderCircle className="spin" size={16}/>:<Sparkles size={16}/>}{aiBusy?aiProgress:'เพิ่มคำตีความ'}</button></section>{report.ai&&<section className="panel executive-panel"><h2>คำตีความและข้อเสนอแนะจาก Gemini</h2>{report.ai.map((a,i)=><div className="ai-insight" key={i}><p><b>คำตีความ:</b> {a.interpretation}</p><p><b>ข้อเสนอแนะ:</b> {a.recommendation}</p><small>{a.evidence_ids.join(', ')}</small></div>)}</section>}<div className="view-actions"><button className="secondary-button" disabled={aiBusy} onClick={()=>setStep(1)}><ArrowLeft size={16}/>ปรับการวิเคราะห์</button><button className="primary-button" onClick={()=>setStep(3)}>สร้างรายงาน <FileText size={17}/></button></div></div>}
- {step===3&&report&&book&&<div className="report-view"><div className="report-toolbar no-print"><div><h2>ตัวอย่างรายงาน</h2><p>ตรวจทานก่อนบันทึก · กระดาษ A4</p></div><div><button className="secondary-button" onClick={()=>download(report,'asw-analysis-report.json')}><Database size={16}/>Report JSON</button><button className="primary-button" onClick={print}><Download size={16}/>บันทึก PDF</button></div></div><ReportView report={report} filename={book.filename} notes={book.notes}/></div>}
- <footer className="main-footer no-print"><span>ASSETWISE · DATA INSIGHT</span><span>ออกแบบเพื่อข้อมูลทุกประเภท</span></footer></main></div></div>;
+ const uploadSafe=(input:File|File[])=>upload(input);
+
+ return <div className="app-shell flow-shell"><aside className="side no-print"><a href="/" className="brand" aria-label="AssetWise Data Insight"><img src="/asw-logo_horizontal.svg" alt="AssetWise"/></a></aside>
+ <div className="workspace"><header className="topbar no-print"><span>ASW DATA INSIGHT</span><span>สร้างรายงานจากข้อมูลของคุณ</span></header>
+ <main className="main"><div className="heading no-print"><div><p className="eyebrow">DATA TO DECISIONS</p><h1 ref={heading} tabIndex={-1}>{['เปลี่ยนข้อมูลเป็นรายงานใน 3 ขั้นตอน',busy?'กำลังวิเคราะห์ข้อมูลของคุณ':'ยังสร้างรายงานไม่สำเร็จ',report?.plan?.processing?.partial?'รายงานพร้อมแล้ว · มีข้อจำกัดบางส่วน':'รายงานของคุณพร้อมแล้ว'][step]}</h1><p className="subtitle">{['เลือกไฟล์ ระบุสิ่งที่อยากรู้ แล้วให้ระบบจัดทำรายงานให้','ระบบกำลังอ่านข้อมูล คำนวณ และเรียบเรียงรายงาน','ตรวจทานผลวิเคราะห์ แล้วบันทึกหรือส่งต่อรายงาน'][step]}</p></div>{step===2&&<button className="secondary-button" onClick={reset}><RotateCcw size={16} aria-hidden="true"/>เริ่มรายงานใหม่</button>}</div>
+ <ol className="flow-steps no-print" aria-label="ขั้นตอนการสร้างรายงาน">{steps.map((label,i)=><li key={label} className={step===i?'active':step>i?'complete':''} aria-current={step===i?'step':undefined}><span>{step>i?<Check size={18} aria-hidden="true"/>:i+1}</span><div><b>{label}</b><small>{['เลือกไฟล์และเป้าหมาย','ตรวจข้อมูลและเขียนบทวิเคราะห์','ตรวจทานและดาวน์โหลด'][i]}</small></div></li>)}</ol>
+ {error&&<div role="alert" className="alert error no-print"><AlertCircle size={20} aria-hidden="true"/><span>{error}</span></div>}
+ {notice&&<div role="status" className="alert info no-print"><Info size={20} aria-hidden="true"/><span>{notice}</span></div>}
+ {step===0&&<section className="panel flow-upload">
+  <div className="flow-upload-head"><span className="feature-icon"><Upload size={22} aria-hidden="true"/></span><div><h2>อัปโหลดข้อมูล</h2><p>รองรับ .xlsx, .xls และ .csv สูงสุด 15 MB ต่อไฟล์</p></div></div>
+  <label className={'dropzone flow-dropzone '+(drag?'dragging':'')} onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);uploadSafe(Array.from(e.dataTransfer.files));}}>
+   <input type="file" multiple accept=".xlsx,.xls,.csv" aria-label="เลือกไฟล์ข้อมูล" onChange={e=>{uploadSafe(Array.from(e.target.files??[]));e.target.value='';}}/>
+   <span className="upload-symbol"><FileSpreadsheet size={30} aria-hidden="true"/></span><h3>{pendingFiles.length?'เลือกไฟล์ใหม่เพื่อเปลี่ยนชุดข้อมูล':'ลากไฟล์มาวางที่นี่'}</h3><p>หรือคลิกเพื่อเลือกไฟล์จากอุปกรณ์</p><span className="secondary-button">เลือกไฟล์</span><small>BOQ และข้อมูลทั่วไปใช้ขั้นตอนเดียวกัน · เลือกหลายไฟล์ได้</small>
+  </label>
+  {pendingFiles.length>0&&<ul className="flow-files" aria-label="ไฟล์ที่เลือก">{pendingFiles.map((f,i)=><li key={f.name+i}><FileSpreadsheet size={20} aria-hidden="true"/><div><b>{f.name}</b><small>{(f.size/1024).toLocaleString('th-TH',{maximumFractionDigits:1})} KB{isDemo?' · ข้อมูลสมมติสำหรับทดลอง':''}</small></div><button type="button" onClick={()=>setPendingFiles(p=>p.filter((_,j)=>j!==i))} aria-label={'นำไฟล์ '+f.name+' ออก'}><X size={18} aria-hidden="true"/></button></li>)}</ul>}
+  <div className="flow-objective"><label htmlFor="report-objective">อยากให้รายงานเน้นเรื่องอะไร? <span>ไม่บังคับ</span></label><textarea id="report-objective" rows={3} maxLength={1000} value={objective} onChange={e=>setObjective(e.target.value)} placeholder="เช่น สรุปต้นทุน แนวโน้ม และรายการที่ควรตรวจสอบ"/><p>เว้นว่างได้ ระบบจะสรุปประเด็นสำคัญจากข้อมูลที่พบ</p></div>
+  <div className="flow-privacy"><ShieldCheck size={18} aria-hidden="true"/><p>คำนวณไฟล์บนอุปกรณ์ ข้อมูลทั่วไปจะส่งชื่อคอลัมน์ ตัวอย่างบางแถว และสถิติให้ Gemini วางแผน ส่วน BOQ ส่งเฉพาะผลคำนวณเพื่อเขียนบทวิเคราะห์ โปรดหลีกเลี่ยงข้อมูลส่วนบุคคลหรือข้อมูลลับ</p></div>
+  <div className="flow-upload-actions"><button className="text-button" onClick={()=>void sample().catch(e=>setError(e.message))}>ลองใช้ข้อมูลตัวอย่าง</button><button className="primary-button" disabled={!pendingFiles.length} onClick={()=>void processFiles(pendingFiles,isDemo)}>เริ่มวิเคราะห์ข้อมูล <ArrowRight size={18} aria-hidden="true"/></button></div>
+ </section>}
+ {step===1&&busy&&<section className="panel flow-processing" aria-busy="true">
+  <div className="flow-processing-icon"><LoaderCircle className="spin" size={32} aria-hidden="true"/></div><h2>กำลังประมวลผลและวิเคราะห์</h2><p className="flow-filenames">{files.join(' · ')}</p>
+  <div role="status" aria-live="polite" aria-atomic="true" className="flow-status">{loading}</div>
+  <ol className="flow-tasks">{['อ่านไฟล์และตรวจโครงสร้างข้อมูล',flowKind==='boq'?'คำนวณเปรียบเทียบราคากลางและราคาเสนอ':'AI ทำความเข้าใจ วางแผน และสั่งคำนวณ',flowKind==='boq'?'AI เรียบเรียงบทวิเคราะห์ BOQ และจัดหน้ารายงาน':'เรียบเรียงบทวิเคราะห์และสร้างรายงาน'].map((label,i)=><li key={label} className={phase===i?'active':phase>i?'complete':''}><span>{phase>i?<Check size={18} aria-hidden="true"/>:phase===i?<LoaderCircle className="spin" size={18} aria-hidden="true"/>:i+1}</span><b>{label}</b><small>{phase>i?'เสร็จแล้ว':phase===i?'กำลังดำเนินการ':'รอดำเนินการ'}</small></li>)}</ol>
+  <p>โปรดเปิดหน้านี้ไว้ ระบบจะพาไปยังรายงานเมื่อเสร็จ<br/>ระยะเวลาขึ้นอยู่กับขนาดข้อมูลและการตอบกลับของ AI</p><button className="secondary-button" onClick={()=>{operation.current++;writing.current?.abort();cancelAnalysis();setBusy(false);setBook(null);setReport(null);setBoq(null);setFlowKind(null);setNotice('');setStep(0);}}>ยกเลิกและกลับไปเลือกไฟล์</button>
+ </section>}
+ {step===1&&!busy&&<section className="panel flow-processing"><AlertCircle size={32} aria-hidden="true"/><h2>AI ยังสร้างรายงานไม่สำเร็จ</h2><p>ข้อมูลยังอยู่ในหน้านี้ สามารถลองใหม่ได้โดยไม่ต้องอัปโหลดอีกครั้ง<br/>รายงานจะเปิดให้ดาวน์โหลดเมื่อ Gemini เขียนครบและผ่านการตรวจสอบแล้ว</p><div className="flow-upload-actions"><button className="secondary-button" onClick={reset}>เลือกข้อมูลใหม่</button><button className="primary-button" onClick={()=>void retryWriting()} disabled={!calculated.current&&!calculatedBoq.current&&!book}>ลองให้ AI เขียนอีกครั้ง</button></div></section>}
+ {step===2&&!busy&&<>
+  {report?.plan?.processing?.partial&&<button className="secondary-button no-print" onClick={()=>void retryWriting()}>ลองประมวลผลส่วนที่ไม่สำเร็จอีกครั้ง</button>}
+  {report&&<div className="flow-report-status no-print"><FileText size={20} aria-hidden="true"/><div><b>{(report.plan?.processing?.partial?'รายงานบางส่วน · ':'เขียนด้วย AI สำเร็จ · ')+(report.writer?.model||'Gemini')}</b><p>{files.join(' · ')} · เขียนเมื่อ {new Date(report.writer?.generated_at||'').toLocaleString('th-TH')}</p></div></div>}
+  {boq&&<div className="flow-report-status no-print"><FileText size={20} aria-hidden="true"/><div><b>รายงาน BOQ รูปแบบเดิม · เขียนด้วย AI สำเร็จ · {boq.report.writer?.model||'Gemini'}</b><p>{files.join(' · ')} · เกณฑ์ความผิดปกติ {(boq.report.tolerance*100).toLocaleString('th-TH',{maximumFractionDigits:2})}% · เขียนเมื่อ {new Date(boq.report.writer?.generated_at||'').toLocaleString('th-TH')}</p></div></div>}
+  {boq&&<BoqReportFrame report={boq.report} html={boq.html} onNotice={setNotice}/>}
+  {report&&book&&<><div className="report-view"><div className="report-toolbar no-print"><div><h2>ตัวอย่างรายงาน</h2><p>รูปแบบ A4 · ตรวจทานก่อนส่งต่อ</p></div><div><button className="secondary-button" onClick={()=>void analyze()}>เขียนรายงานใหม่</button><button className="secondary-button" onClick={()=>download(report,'asw-analysis-report.json')}><Database size={16} aria-hidden="true"/>Report JSON</button><button className="primary-button" onClick={print}><Download size={16} aria-hidden="true"/>บันทึก PDF</button></div></div><ReportView report={report} filename={book.filename} notes={book.notes}/></div><details className="flow-adjust no-print"><summary>ดูข้อมูลและปรับการวิเคราะห์</summary><WorkbookOverview book={book} selected={selected} onSelected={setSelected} objective={objective} onObjective={setObjective} onAnalyze={analyze}/></details></>}
+ </>}
+ <footer className="main-footer no-print"><span>ASSETWISE · DATA INSIGHT</span><span>ข้อมูลของคุณ สู่รายงานที่พร้อมตัดสินใจ</span></footer>
+ </main></div></div>;
 }

@@ -59,6 +59,21 @@ assert.ok(boq.html.includes('ผู้เสนองาน: AAA')&&boq.html.inc
 assert.deepEqual(boqProgress,[{done:1,total:1,name:'compare.xlsx'}]);
 const rebuilt=JSON.parse(await py.runPythonAsync("json.dumps(dispatch('boq_rebuild',{'tolerance':0.01}),ensure_ascii=False,allow_nan=False)"));
 assert.equal(rebuilt.report.tolerance_source,'declared');
+const unified=JSON.parse(await py.runPythonAsync("json.dumps(dispatch('inspect_files',{'files':[{'filename':'compare.xlsx','bytes':f.getvalue()},{'filename':'extra.csv','bytes':b'Team,Amount\\nA,10\\nB,20\\n'}]}),ensure_ascii=False,allow_nan=False)"));
+assert.equal(unified.sheets_count,3);
+assert.equal(unified.mode,undefined);
+assert.ok(unified.tables.some(t=>t.sheet.includes('compare.xlsx')));
+const unifiedReport=JSON.parse(await py.runPythonAsync("json.dumps(dispatch('analyze_workbook',{}),ensure_ascii=False,allow_nan=False)"));
+assert.equal(unifiedReport.vendors,undefined);
+assert.ok(unifiedReport.evidence.some(e=>e.source.sheet.includes('extra.csv')));
+const narrativeReport=structuredClone(rebuilt.report);
+narrativeReport.vendors[0].insights=['ข้อความวิเคราะห์ทดสอบ <script>'];
+narrativeReport.executive.summary='บทสรุปทดสอบ';
+py.globals.set('_narrative_report',JSON.stringify({report:narrativeReport}));
+const rendered=await py.runPythonAsync("dispatch('boq_render',json.loads(_narrative_report))");
+assert.ok(rendered.includes('ข้อความวิเคราะห์ทดสอบ &lt;script&gt;'));
+assert.ok(rendered.includes('บทสรุปทดสอบ'));
+assert.deepEqual([...rendered.matchAll(/<table>[\s\S]*?<\/table>/g)].map(m=>m[0]),[...rebuilt.html.matchAll(/<table>[\s\S]*?<\/table>/g)].map(m=>m[0]));
 console.log(JSON.stringify({runtime:py.version,rows:table.rows_count,analyses:report.analyses.length,evidence:report.evidence.length,xlsx:'passed',boq:boq.report.vendors.length}));
 }
 main().catch(e=>{console.error(String(e.message).slice(-4000));process.exitCode=1;});

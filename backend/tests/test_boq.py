@@ -128,8 +128,17 @@ class Dispatch(unittest.TestCase):
         out = e.dispatch('boq', {'files': [{'filename': 'sales.xlsx', 'bytes': workbook_bytes(b)}]})
         self.assertEqual(out['mode'], 'generic')
         self.assertEqual(out['book']['tables_count'], 1)
-        self.assertEqual(e.dispatch('boq', {'files': [{'filename': 'a.xlsx', 'bytes': workbook_bytes(b)},
-                                                      {'filename': 'b.xlsx', 'bytes': workbook_bytes(b)}]})['mode'], 'none')
+        many = e.dispatch('boq', {'files': [{'filename': 'a.xlsx', 'bytes': workbook_bytes(b)},
+                                            {'filename': 'b.xlsx', 'bytes': workbook_bytes(b)}]})
+        self.assertEqual(many['mode'], 'generic')
+        self.assertEqual(many['book']['tables_count'], 2)
+        self.assertEqual(many['book']['sheets'][0]['name'], '[1] a.xlsx / Sheet')
+
+    def test_csv_generic_upload_falls_through_with_its_profile(self):
+        raw = 'Region,Amount\nNorth,10\nSouth,20\n'.encode()
+        out = e.dispatch('boq', {'files': [{'filename': 'sales.csv', 'bytes': raw}]})
+        self.assertEqual(out['mode'], 'generic')
+        self.assertEqual(out['book']['tables_count'], 1)
 
     def test_single_vendor_report_omits_the_comparison_section(self):
         html = R.render(B.build_many([(sheets_of(single_vendor_book()), 'one.xlsx')]))

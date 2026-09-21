@@ -5,17 +5,19 @@
 1. Workbook readers: XLSX, XLS, CSV; Thai/English; visible/hidden inspection and formula-cache warnings.
 2. Table detector: displaced headers, supported merged header parents, separate vertical/horizontal regions, partial/headerless tables, ranges and confidence.
 3. Profiles: types, roles, samples, unique counts, nulls, numeric statistics. Quality: missingness, duplicates, constants, mixed numeric cells, ambiguous dates and summary candidates.
-4. Planner: generic eligibility and explanations; users select table and analyses.
+4. Planner: Gemini chooses eligible analyses automatically, with one planning pass followed by one deterministic calculation pass, without a whole-workbook AI review. Bounded fragments handle multi-table/wide workbooks; all bounded parts are processed with at most two concurrent requests (one after an error), including queues larger than 64 parts. Users need not choose tables or answer clarification questions.
 5. Deterministic engine: summary statistics, category frequencies/means, monthly means, distributions, IQR outliers and stable Pearson correlation.
 6. Evidence: calculation IDs, table/sheet/range/columns, methods and limitations. Numeric evidence remains Python-owned.
-7. Optional server-side Gemini interpretation endpoint, disabled without configured key/model. Referenced evidence IDs and numerical-digit claims are validated; no live provider call has been tested without credentials.
+7. Server-side Gemini planning and narrative writing are required for the current upload flow. Numeric claims and operation IDs are checked; semantic correctness is not guaranteed. Real Gemini 2.5 Flash calls have been tested using synthetic BOQ data.
 8. Dynamic report sections from executed analyses, executive facts, provenance, quality and recommendations; JSON download and A4 browser PDF printing.
 9. Responsive Thai UI using supplied ASW SVG, navy and white; loading/error/cancel/reset states and synthetic sample data.
-10. Tests: sixteen targeted Python tests covering eight domain fixtures plus six parsing/numerical regressions and validation failures. Pyodide integration checks CSV/XLSX and all selected sample analyses.
+10. Tests cover parser ambiguity, multi-table workbooks, bounded planning for 201 tables, 804-evidence hierarchical summaries, cancellation, cached retries and partial narrative failures, including an 86-part single-pass upload-to-writing regression, legacy review compatibility and recovery after part 64. Pyodide integration checks CSV/XLSX and sample analyses.
+11. The upload entry point probes for BOQ comparison structure first. Detected BOQ files use the original deterministic comparison engine and A4 renderer with Gemini replacing narrative slots only; non-BOQ files fall through to the generic AI-planned report without a second file parse.
+11. Partial processing is disclosed in report UI and JSON. In-memory successful-request checkpoints support retry without resending successful parts; no durable background queue yet.
 
 ## Remaining for the full production brief
 
-- Manual header/region, role, date-format and unit overrides; richer semantic understanding and LLM-assisted plan prioritization.
+- Optional manual header/region, role, date-format and unit overrides; richer semantic understanding. Current automatic mode limits ambiguous tables to quality checks instead of asking questions or guessing.
 - Stronger multi-row header, note/summary-region and arbitrary sparse-layout detection. Multi-sheet relationships require explicit keys and cardinality checks.
 - Additive metric/unit validation before sums, Pareto, contribution, ratios, growth or financial calculations. Weighted rates, period completeness and incompatible currencies need explicit rules. MAD/robust Z-score, cross-tabs, concentration and segmentation are not yet implemented.
 - A Python job service and queue with authorization, durable evidence, retention policy and operational monitoring, if server storage is needed.

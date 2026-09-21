@@ -42,7 +42,7 @@ const server = createServer(async (incoming, outgoing) => {
   }
 });
 
-server.requestTimeout = 60_000;
+server.requestTimeout = 110_000;
 server.listen(port, '0.0.0.0', () => console.log(`Backend ready on 0.0.0.0:${port}`));
 server.on('error', error => { console.error(`Backend could not listen (${error.code || 'unknown'}).`); process.exitCode = 1; });
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { server.close(() => process.exit(0)); server.closeAllConnections(); });

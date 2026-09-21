@@ -158,6 +158,42 @@ def profile(name, vals, formats):
         result['stats']={'count':len(nums),'mean':statistics.mean(nums),'median':statistics.median(nums),'min':min(nums),'max':max(nums),'std':statistics.stdev(nums) if len(nums)>1 else 0}
     return result
 
+def planning_context(t):
+    """Full-table summaries plus bounded, source-addressable examples, not a statistical sample."""
+    rows=t['rows']; n=len(rows); picked={}; columns=[]
+    def pick(i,reason):
+        if i not in picked and len(picked)>=60:return
+        picked.setdefault(i,[]).append(reason)
+    for i in sorted({round(k*(n-1)/min(19,n-1)) for k in range(min(20,n))}) if n>1 else range(n):pick(i,'spread_across_rows')
+    for j,c in enumerate(t['columns']):
+        info={'name':c['name'],'role':c['role'],'rows_scanned':n,'missing':c['missing']}
+        if c['role']=='measure':
+            pairs=[(i,number(r[j])) for i,r in enumerate(rows) if number(r[j]) is not None]
+            vals=[v for _,v in pairs]
+            if vals:
+                q1=quantile(vals,.25);q3=quantile(vals,.75);iqr=q3-q1
+                low=q1-1.5*iqr;high=q3+1.5*iqr
+                out=[(i,v) for i,v in pairs if iqr>0 and (v<low or v>high)]
+                examples=sorted(out,key=lambda p:max(low-p[1],p[1]-high),reverse=True)[:3]
+                info.update({'stats':c.get('stats',{}),'q1':q1,'q3':q3,'iqr':iqr,'outlier_count':len(out),'outlier_examples':[{'row':t['source_rows'][i],'value':v} for i,v in examples],'outlier_rule':'1.5 IQR; disabled when IQR is zero'})
+                for i,v in [min(pairs,key=lambda p:p[1]),max(pairs,key=lambda p:p[1])]+examples:pick(i,'numeric_extreme:'+c['name'])
+        elif c['role'] in ('dimension','time_dimension','label'):
+            counts={};first={};last={}
+            for i,r in enumerate(rows):
+                value=iso(r[j]) if c['role']=='time_dimension' else str(clean(r[j])) if present(r[j]) else None
+                if value is None:continue
+                key=value[:7] if c['role']=='time_dimension' else value
+                counts[key]=counts.get(key,0)+1;first.setdefault(key,i);last[key]=i
+            ordered=sorted(counts) if c['role']=='time_dimension' else sorted(counts,key=lambda k:(-counts[k],k))
+            keys=ordered if len(ordered)<=20 else sorted(set(ordered[:10]+ordered[-10:]))
+            info.update({'groups':[{'label':k,'count':counts[k]} for k in keys],'groups_total':len(counts),'groups_omitted':len(counts)-len(keys),'omitted_rows':sum(counts[k] for k in counts if k not in keys)})
+            if c['role']=='time_dimension':
+                dates=[iso(r[j]) for r in rows if iso(r[j]) is not None]
+                info.update({'start':min(dates) if dates else None,'end':max(dates) if dates else None,'valid_dates':len(dates)})
+            for k in keys:pick(first[k],'group_or_period:'+c['name']);pick(last[k],'group_or_period:'+c['name'])
+        columns.append(info)
+    return {'rows_scanned':n,'columns':columns,'samples':[{'row':t['source_rows'][i],'values':[str(clean(v))[:160] if v is not None else None for v in rows[i]],'reasons':reasons} for i,reasons in sorted(picked.items())], 'sampling':'Up to 60 rows: spread across row positions, extremes, category and period examples. Not random or representative. Coverage is bounded; use full-table summaries for conclusions.'}
+
 def detect(sheet):
     grid = sheet['grid']
     if not grid:
@@ -252,6 +288,7 @@ def detect(sheet):
             t={'id':table_id,'name':f"{sheet['name']} · ตาราง {len(found)+1}",'sheet':sheet['name'],'range':f'{col_letter(lo+1)}{(header if header is not None else start)+1}:{col_letter(hi)}{band[-1]+1}','header_row':header+1 if header is not None else None,'confidence':round(min(1,best[0]),2) if header is not None else .45,'rows_count':len(rows),'columns_count':len(columns),'columns':columns,'preview':rows[:12],'quality':{'missing':missing,'duplicates':duplicate,'completeness':round(100-missing/(len(rows)*len(columns))*100,1),'issues':issues},'excluded_rows':excluded,'source_rows':source_rows,'column_offset':lo,'rows':rows,'original':original}
             TABLES[table_id]=t
             t['opportunities']=plan(t)
+            t['planning_context']=planning_context(t)
             found.append({k:v for k,v in t.items() if k not in ('rows','original','source_rows')})
     return found
 
@@ -279,7 +316,7 @@ def plan(t):
                 add('correlation',f'{cols[i]["name"]} ↔ {cols[j]["name"]}','Pearson correlation ของแถวที่มีค่าครบ ไม่สรุปเหตุและผล',[i,j])
     return plans
 
-def inspect(raw, filename, sheets=None):
+def inspect(raw, filename, sheets=None, safe=False):
     TABLES.clear()
     WORKBOOK.clear()
     if not raw:raise ValueError('ไฟล์ว่าง กรุณาเลือกไฟล์ที่มีข้อมูล')
@@ -287,7 +324,24 @@ def inspect(raw, filename, sheets=None):
     sheets=sheets if sheets is not None else load_sheets(raw,filename)
     tables=[]; notes=[]
     for sheet in sheets:
-        tables.extend(detect(sheet))
+        try:
+            detected=detect(sheet)
+            if safe:
+                for t in detected:
+                    unsafe=t['confidence']<.7 or any(i['kind']=='summary' for i in t['quality']['issues'])
+                    if unsafe:
+                        reason='งดวิเคราะห์เชิงตัวเลขในตารางนี้ เพราะหัวตารางหรือแถวรวมยังไม่ชัดเจน ตรวจเฉพาะคุณภาพข้อมูลโดยไม่เดาความหมาย'
+                        t['opportunities']=[p for p in t['opportunities'] if p['type']=='quality']
+                        TABLES[t['id']]['opportunities']=t['opportunities']
+                        t['quality']['issues'].append({'kind':'ambiguous_scope','severity':'warning','count':1,'message':reason})
+                        notes.append(f"{sheet['name']}!{t['range']}: {reason}")
+            tables.extend(detected)
+        except (ValueError,TypeError,OverflowError,IndexError,statistics.StatisticsError):
+            if not safe:raise
+            # Failed sheets are explicit coverage gaps, never invented results.
+            for tid in [tid for tid,t in TABLES.items() if t['sheet']==sheet['name']]:del TABLES[tid]
+            sheet['parse_error']='อ่านโครงสร้างชีตนี้ไม่สำเร็จ จึงไม่รวมในการวิเคราะห์'
+            notes.append(f"{sheet['name']}: {sheet['parse_error']}")
         if sheet['hidden_rows'] or sheet['hidden_columns'] or sheet['state']!='visible':notes.append(f"{sheet['name']}: รวมข้อมูลจากแถว คอลัมน์ หรือชีตที่ซ่อนอยู่แล้ว")
         uncached=sum(not f['cached'] for f in sheet['formulas'])
         if uncached:notes.append(f"{sheet['name']}: สูตร {uncached} เซลล์ไม่มีค่าที่คำนวณไว้ ให้เปิดไฟล์ใน Excel แล้วบันทึกใหม่ก่อนวิเคราะห์")
@@ -298,7 +352,7 @@ def inspect(raw, filename, sheets=None):
     coverage=[]
     for sheet in sheets:
         members=[t for t in tables if t['sheet']==sheet['name']]
-        coverage.append({'name':sheet['name'],'state':sheet['state'],'tables_count':len(members),'rows_count':sum(t['rows_count'] for t in members),'table_ids':[t['id'] for t in members],'status':'ready' if members else 'no_table','reason':'' if members else ('ชีตว่าง' if not sheet['grid'] else 'ไม่พบตารางที่มีอย่างน้อยสองแถว')})
+        coverage.append({'name':sheet['name'],'state':sheet['state'],'tables_count':len(members),'rows_count':sum(t['rows_count'] for t in members),'table_ids':[t['id'] for t in members],'status':'ready' if members else 'no_table','reason':'' if members else sheet.get('parse_error',('ชีตว่าง' if not sheet['grid'] else 'ไม่พบตารางที่มีอย่างน้อยสองแถว'))})
     titles={'quality':'คุณภาพข้อมูลทุกตาราง','statistics':'สถิติเบื้องต้น','outliers':'ค่าผิดปกติ','distribution':'การกระจายของตัวเลข','frequency':'สัดส่วนหมวดหมู่','category':'เปรียบเทียบตามหมวดหมู่','trend':'แนวโน้มตามเวลา','correlation':'ความสัมพันธ์ระหว่างตัวเลข'}
     opportunities=[]
     for kind,title in titles.items():
@@ -307,6 +361,27 @@ def inspect(raw, filename, sheets=None):
     profile={'filename':filename,'sheets_count':len(sheets),'tables_count':len(tables),'rows_count':sum(t['rows_count'] for t in tables),'tables':tables,'sheets':coverage,'summary':summarize_tables(tables),'opportunities':opportunities,'notes':notes,'workbook_profile':[{'name':s['name'],'merged_ranges':s['merges'],'hidden_rows':s['hidden_rows'],'hidden_columns':s['hidden_columns'],'formulas':s['formulas'],'errors':s['errors']} for s in sheets],'understanding':{'dataset_summary':f'อ่านครบ {len(sheets)} ชีต · พบ {len(tables)} ตาราง พร้อมวิเคราะห์ทั้งหมดอัตโนมัติ','possible_domain':'ไม่กำหนดประเภทธุรกิจ','grain':'คำนวณแยกแต่ละตาราง แล้วรวมข้อค้นพบในรายงานเดียวพร้อมระบุชีตต้นทาง','limitations':['การแยกตารางและบทบาทคอลัมน์เป็นการอนุมาน ควรตรวจทานก่อนใช้ตัดสินใจ','ไม่คำนวณสูตร Excel ใหม่ และไม่อนุมานหน่วย เงินสกุล หรือเหตุและผล']}}
     WORKBOOK.update(profile)
     return profile
+
+def inspect_files(files, progress=None):
+    """One ingestion path for all uploads; no domain detection or cross-file joins."""
+    TABLES.clear();WORKBOOK.clear()
+    if not isinstance(files,list) or not files:raise ValueError('กรุณาเลือกไฟล์ข้อมูล')
+    sheets=[];cells=0
+    try:
+        for i,f in enumerate(files):
+            raw=bytes(f['bytes']);name=f['filename']
+            if not raw:raise ValueError(f'{name}: ไฟล์ว่าง')
+            if len(raw)>15*1024*1024:raise ValueError(f'{name}: ไฟล์ใหญ่กว่า 15 MB')
+            loaded=load_sheets(raw,name)
+            for sh in loaded:
+                cells+=sum(len(row) for row in sh['grid'])
+                if cells>MAX_CELLS:raise ValueError('ข้อมูลรวมเกิน 400,000 เซลล์ กรุณาแบ่งไฟล์')
+                if len(files)>1:sh={**sh,'name':f'[{i+1}] {name} / {sh["name"]}'}
+                sheets.append(sh)
+            if progress:progress(i+1,len(files),name)
+        return inspect(b'loaded', ' · '.join(f['filename'] for f in files), sheets, safe=True)
+    except Exception:
+        TABLES.clear();WORKBOOK.clear();raise
 
 def table_source(t):
     return {'table_id':t['id'],'sheet':t['sheet'],'range':t['range'],'source_columns':[]}
@@ -371,16 +446,22 @@ def analyze(table_id, selected, objective=''):
         evidence.append(e);results.append({'id':sid,'title':p['title'],'type':kind,'finding':finding,'data':data,'chart':chart,'evidence_id':eid,'method':p['reason']})
     return {'metadata':{'title':'รายงานการวิเคราะห์ข้อมูล','table':t['name'],'source_range':t['range'],'objective':objective[:1000],'generated_at':datetime.now().isoformat(),'engine':'Python deterministic engine 1.0','interpretation_mode':'evidence-based templates'},'dataset_overview':{k:t[k] for k in ['rows_count','columns_count','sheet','range','columns']},'data_quality':t['quality'],'excluded_rows':t['excluded_rows'],'analyses':results,'evidence':evidence,'sections':[r['type'] for r in results],'executive_summary':[r['finding'] for r in results[:5]],'recommendations':['ตรวจสอบค่าว่าง แถวซ้ำ และบทบาทคอลัมน์ก่อนนำผลไปใช้ตัดสินใจ','ตรวจสอบเหตุผลของค่าผิดปกติกับเจ้าของข้อมูล โดยไม่ลบออกอัตโนมัติ'] if t['quality']['issues'] else ['ตรวจทานความหมายของตัวชี้วัดและหน่วยกับเจ้าของข้อมูลก่อนนำผลไปใช้'],'limitations':['ไม่มีการอนุมานเหตุและผล','ค่าเฉลี่ยอาจไม่เหมาะกับตัวชี้วัดทุกประเภท','วิเคราะห์เฉพาะตารางที่เลือก ไม่มีการ join ข้ามตาราง','วัตถุประสงค์บันทึกไว้ในรายงาน การจัดลำดับตามวัตถุประสงค์ต้องใช้ Gemini']}
 
-def analyze_workbook(selected_types=None, objective='', progress=None):
+def analyze_workbook(selected_types=None, objective='', progress=None, selected_plans=None):
     if not WORKBOOK or not TABLES:raise ValueError('ไม่พบชุดข้อมูล กรุณาอัปโหลดใหม่')
     allowed={p['type'] for p in WORKBOOK['opportunities']}
     selected=allowed if selected_types is None else set(selected_types)
     if selected-allowed:raise ValueError('ประเภทการวิเคราะห์ไม่ถูกต้อง')
     selected=selected|{'quality'}
+    chosen=None
+    if selected_plans is not None:
+        valid={(t['id'],p['id']) for t in TABLES.values() for p in t['opportunities']}
+        if not isinstance(selected_plans,list) or not selected_plans:raise ValueError('แผนวิเคราะห์ว่าง')
+        chosen={(p.get('table_id'),p.get('analysis_id')) for p in selected_plans}
+        if not chosen.issubset(valid):raise ValueError('แผนวิเคราะห์ไม่ตรงกับข้อมูล')
     results=[];evidence=[];errors=[];table_reports=[]
     for index,t in enumerate(TABLES.values()):
         completed=0;failed=0
-        plans=[p for p in t['opportunities'] if p['type'] in selected]
+        plans=[p for p in t['opportunities'] if p['type']=='quality' or (t['id'],p['id']) in chosen] if chosen is not None else [p for p in t['opportunities'] if p['type'] in selected]
         for p in plans:
             try:
                 part=analyze(t['id'],[p['id']],objective)
@@ -425,7 +506,15 @@ def boq(files, tolerance=None, progress=None):
         if len(files)==1:
             sheets,name,raw=BOQ_BOOKS[0]
             return {'mode':'generic','book':inspect(raw,name,sheets)}
-        return {'mode':'none'}
+        # The BOQ probe already opened every workbook. Reuse those sheets for
+        # the generic path instead of making the browser parse all files twice.
+        sheets=[];cells=0
+        for i,(loaded,name,_) in enumerate(BOQ_BOOKS):
+            for sheet in loaded:
+                cells+=sum(len(row) for row in sheet['grid'])
+                if cells>MAX_CELLS:raise ValueError('ข้อมูลรวมเกิน 400,000 เซลล์ กรุณาแบ่งไฟล์')
+                sheets.append({**sheet,'name':f'[{i+1}] {name} / {sheet["name"]}'})
+        return {'mode':'generic','book':inspect(b'loaded',' · '.join(f['filename'] for f in files),sheets,safe=True)}
     return {'mode':'boq','report':report,'html':boq_report.render(report)}
 
 def boq_rebuild(tolerance=None):
@@ -436,9 +525,13 @@ def boq_rebuild(tolerance=None):
     return {'mode':'boq','report':report,'html':boq_report.render(report)}
 
 def dispatch(action, payload, progress=None):
+    if action=='inspect_files':return inspect_files(payload['files'],progress)
+    if action=='boq_render':
+        import boq_report
+        return boq_report.render(payload['report'])
     if action=='inspect':return inspect(bytes(payload['bytes']),payload['filename'])
     if action=='analyze':return analyze(payload['table_id'],payload['selected'],payload.get('objective',''))
-    if action=='analyze_workbook':return analyze_workbook(payload.get('selected_types'),payload.get('objective',''),progress)
+    if action=='analyze_workbook':return analyze_workbook(payload.get('selected_types'),payload.get('objective',''),progress,payload.get('selected_plans'))
     if action=='boq':return boq(payload['files'],payload.get('tolerance'),progress)
     if action=='boq_rebuild':return boq_rebuild(payload.get('tolerance'))
     raise ValueError('Unknown action')

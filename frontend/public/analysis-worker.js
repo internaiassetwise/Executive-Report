@@ -28,7 +28,15 @@ self.onmessage = async ({data:{id,action,payload}}) => {
     const py = await ready(id);
     const opening = {inspect:'กำลังทำความเข้าใจข้อมูล…', boq:'กำลังอ่านไฟล์และตรวจโครงสร้าง BOQ…', boq_rebuild:'กำลังคำนวณใหม่ตามเกณฑ์ที่กำหนด…'};
     self.postMessage({id,status:'progress',message:opening[action]||'กำลังคำนวณและตรวจสอบหลักฐาน…',progress:65});
-    if(action==='inspect') {
+    if(action==='inspect_files') {
+      py.globals.set('_upload_names',payload.files.map(f=>f.filename));
+      py.globals.set('_upload_bytes',payload.files.map(f=>new Uint8Array(f.bytes)));
+      py.globals.set('_upload_progress',(done,total,name)=>self.postMessage({id,status:'progress',message:`กำลังอ่านไฟล์ ${done} / ${total} · ${name}`,progress:10+Math.round(done/total*55)}));
+      try{
+        const result=await py.runPythonAsync("json.dumps(dispatch('inspect_files', {'files':[{'filename':n,'bytes':bytes(b.to_py())} for n,b in zip(_upload_names.to_py(), _upload_bytes)]}, _upload_progress), ensure_ascii=False, allow_nan=False)");
+        self.postMessage({id,status:'complete',result:JSON.parse(result)});
+      }finally{for(const name of ['_upload_names','_upload_bytes','_upload_progress'])if(py.globals.has(name))py.globals.delete(name);}
+    } else if(action==='inspect') {
       py.globals.set('_input_bytes',new Uint8Array(payload.bytes));
       py.globals.set('_filename',payload.filename);
       const result=await py.runPythonAsync("json.dumps(inspect(bytes(_input_bytes.to_py()), _filename), ensure_ascii=False, allow_nan=False)");

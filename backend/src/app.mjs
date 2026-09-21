@@ -1,9 +1,16 @@
 import { readFile } from 'node:fs/promises';
 import { configured, interpret } from './gemini.mjs';
+import { writeReport } from './report-writer.mjs';
+import { planReport } from './analysis-planner.mjs';
 
 export function createHandler(config, fetcher = fetch) {
   return async function handle(request) {
     const path = new URL(request.url).pathname;
+    if(path==='/api/plan')return request.method==='POST'?planReport(request,config,fetcher):Response.json({error:'Method not allowed'},{status:405});
+    if (path === '/api/report') {
+      if(request.method === 'POST') return writeReport(request, config, fetcher);
+      return Response.json({error:'Method not allowed'}, {status:405});
+    }
     if (path === '/api/health' && request.method === 'GET') {
       return Response.json({ status: 'ok', service: 'asw-backend' });
     }

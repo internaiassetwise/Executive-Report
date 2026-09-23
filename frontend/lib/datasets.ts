@@ -5,8 +5,10 @@ export interface DataSheet {
   name: string;
   rows_count: number;
   columns: DataColumn[];
-  header_row: number;
+  header_row: number | null;
   warnings: string[];
+  /** Set on the stacked view of sheets that share one header row. */
+  combined_from?: string[];
 }
 export interface Dataset {
   filename: string;

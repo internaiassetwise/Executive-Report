@@ -81,7 +81,7 @@ export function DatasetResults({ id, dataset, analysis, boq, onAnalyze, retrying
   return <div className="office-results">
     <nav className="office-tabs" aria-label="มุมมอง">
       {tabs.map(({ id: value, label, Icon }) => <button key={value} className={tab === value ? 'active' : ''} aria-current={tab === value ? 'page' : undefined} onClick={() => setTab(value)}><Icon size={16} aria-hidden="true" />{label}</button>)}
-      <span className="office-tabs-meta">{num(dataset.rows_count)} แถว · {dataset.sheets.length} ชีต</span>
+      <span className="office-tabs-meta">{num(dataset.rows_count)} แถว · {dataset.sheets.filter(sheet => !sheet.combined_from).length} ชีต</span>
     </nav>
     {error && <div className="data-error" role="alert"><Info size={18} /><p>{error}</p></div>}
 

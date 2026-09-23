@@ -169,7 +169,9 @@ def plan(profiles, filename="", sheet_id=None):
     def score(profile):
         roles = [column.get("role") for column in profile["columns"]]
         # A summary sheet is what a reader wants first, even when detail sheets are longer.
-        return ("measure" in roles, bool(SUMMARY_SHEET.search(profile["sheet_name"])), "dimension" in roles or "time" in roles or "attribute" in roles, profile["rows_count"])
+        # The stacked all-sheets view comes first, then a summary sheet, then the longest sheet.
+        combined = profile["sheet_name"].startswith("รวมทุกชีต")
+        return ("measure" in roles, combined, bool(SUMMARY_SHEET.search(profile["sheet_name"])), "dimension" in roles or "time" in roles or "attribute" in roles, profile["rows_count"])
     candidates = [p for p in profiles if p["sheet_id"] == sheet_id] if sheet_id else profiles
     if not candidates:
         _fail("INVALID_SPEC", "ไม่พบชีตที่เลือก")

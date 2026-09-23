@@ -142,7 +142,7 @@ export function DashboardView({ id, dataset, analysis, spec: planned }: { id: st
         <h2>{spec?.title || `ภาพรวมข้อมูล ${sheet?.name || ''}`}</h2>
         {spec?.description && <p>{spec.description}</p>}
         <div className="dash-meta">
-          <label>ชีต <select aria-label="เลือกชีตที่ต้องการดู" value={sheetId} onChange={event => changeSheet(event.target.value)}>{dataset.sheets.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          <label>ชีต <select aria-label="เลือกชีตที่ต้องการดู" value={sheetId} onChange={event => changeSheet(event.target.value)}>{[...dataset.sheets].sort((a, b) => Number(Boolean(b.combined_from)) - Number(Boolean(a.combined_from))).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
           <span>{dataset.filename}</span>
           <span>วิเคราะห์เมื่อ {new Date(analysis.generated_at).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })}</span>
         </div>

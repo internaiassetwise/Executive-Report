@@ -427,6 +427,7 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None)
             result["warnings"].append(f"พบเซลล์ข้อผิดพลาดของสูตร Excel (เช่น #DIV/0!) {uncached['errors']:,} เซลล์ เก็บเป็นค่าว่างและไม่นำมาคำนวณ")
         if not result["sheets"]:
             fail("EMPTY_DATASET", "ไม่พบแถวข้อมูล กรุณาเลือกไฟล์ที่มีหัวคอลัมน์และข้อมูลอย่างน้อยหนึ่งแถว")
+        combine_sheets(connection, result)
         progress("detecting_types", 80)
         connection.execute("INSERT INTO metadata VALUES ('dataset', ?)", (json.dumps(result, ensure_ascii=False, allow_nan=False),))
         connection.commit()
@@ -453,6 +454,44 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None)
             connection.close()
         if not succeeded and connection is not None:
             sqlite_path.unlink(missing_ok=True)
+
+
+def combine_sheets(connection, result):
+    """Stack sheets that share the same header row into one extra table so a
+    dashboard can compare them (e.g. one BOQ sheet per building). Adds a "ชีต"
+    column and, when names follow PREFIX_SUFFIX, a "กลุ่มชีต" column. Summary
+    rows stay out; source sheets are untouched and dataset totals ignore it."""
+    groups = {}
+    for sheet in result["sheets"]:
+        signature = tuple(column["name"].casefold() for column in sheet["columns"])
+        if len(signature) >= 2:
+            groups.setdefault(signature, []).append(sheet)
+    members = max((group for group in groups.values() if len(group) >= 2), key=lambda group: (sum(s["rows_count"] for s in group), len(group)), default=None)
+    if not members:
+        return
+    width = len(members[0]["columns"])
+    names = [sheet["name"] for sheet in members]
+    prefixes = [name.split("_", 1)[0] for name in names]
+    by_prefix = all("_" in name for name in names) and 2 <= len(set(prefixes)) < len(names)
+    sheet_id = f"s{len(result['sheets'])}"
+    columns = [{**column} for column in members[0]["columns"]] + [{"key": f"c{width}", "name": "ชีต", "data_type": "text"}]
+    if by_prefix:
+        columns.append({"key": f"c{width + 1}", "name": "กลุ่มชีต", "data_type": "text"})
+    connection.execute(f'CREATE TABLE "data_{sheet_id}" (row_number INTEGER PRIMARY KEY, data TEXT NOT NULL)')
+    rows = 0
+    for sheet, prefix in zip(members, prefixes):
+        # Identical header rows give identical positional keys (c0, c1, ...).
+        extra = f"json_set(data, '$.c{width}', ?" + (f", '$.c{width + 1}', ?)" if by_prefix else ")")
+        params = [sheet["name"], prefix] if by_prefix else [sheet["name"]]
+        cursor = connection.execute(f'INSERT INTO "data_{sheet_id}" (data) SELECT {extra} FROM "data_{sheet["id"]}" WHERE row_number NOT IN (SELECT value FROM json_each(?)) ORDER BY row_number', [*params, json.dumps(sheet.get("summary_rows", []))])
+        rows += cursor.rowcount
+    for column in columns:
+        types = {sheet["columns"][index]["data_type"] for sheet in members for index, candidate in enumerate(sheet["columns"]) if candidate["key"] == column["key"]}
+        if types:
+            column["data_type"] = next(iter(types)) if len(types) == 1 else "mixed"
+    result["sheets"].append({"id": sheet_id, "name": f"รวมทุกชีต ({len(members)} ชีต)", "rows_count": rows, "columns": columns, "header_row": None,
+                             "warnings": [f"รวมข้อมูลจาก {len(members)} ชีตที่มีหัวคอลัมน์เหมือนกัน: {', '.join(names[:8])}{' …' if len(names) > 8 else ''} โดยไม่นับแถวสรุปยอด"],
+                             "summary_rows": [], "combined_from": names})
 
 
 def preview(sqlite_path, query):

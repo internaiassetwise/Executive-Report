@@ -415,10 +415,12 @@ def analyze(sqlite_path, progress=None):
             findings.append(sheet_findings)
             charts.append(sheet_charts)
             metrics.append(sheet_kpis)
-        rows_count = sum(profile["rows_count"] for profile in profiles)
-        missing = sum(profile["missing_count"] for profile in profiles)
-        duplicates = sum(profile["duplicate_rows"] for profile in profiles)
-        cells = sum(profile["rows_count"] * len(profile["columns"]) for profile in profiles)
+        # The stacked "all sheets" table repeats source rows; overall totals skip it.
+        originals = [profile for profile, sheet in zip(profiles, dataset["sheets"]) if not sheet.get("combined_from")]
+        rows_count = sum(profile["rows_count"] for profile in originals)
+        missing = sum(profile["missing_count"] for profile in originals)
+        duplicates = sum(profile["duplicate_rows"] for profile in originals)
+        cells = sum(profile["rows_count"] * len(profile["columns"]) for profile in originals)
         completeness = round((cells - missing) / cells * 100, 4) if cells else 0
         global_quality = insight("ภาพรวมคุณภาพข้อมูล", f"ข้อมูล {fmt(rows_count)} แถวจาก {fmt(len(profiles))} ชีต มีความครบถ้วน {fmt(completeness)}% พบค่าว่าง {fmt(missing)} เซลล์ และแถวซ้ำภายในชีต {fmt(duplicates)} แถว",
                                  "quality", "ทุกชีต", [], "completeness_percentage", completeness, "ความครบถ้วนถ่วงน้ำหนักตามจำนวนเซลล์ข้อมูลทุกชีต; แถวซ้ำตรวจภายในแต่ละชีต", "high" if completeness < 90 else "medium")

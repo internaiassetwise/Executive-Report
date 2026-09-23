@@ -12,6 +12,7 @@ const MiB = 1024 * 1024;
 export const MULTIPART_OVERHEAD = 64 * 1024;
 const workerPath = fileURLToPath(new URL('../datasets/worker.py', import.meta.url));
 const exportWorkerPath = fileURLToPath(new URL('../datasets/exports.py', import.meta.url));
+const boqWorkerPath = fileURLToPath(new URL('../datasets/boq.py', import.meta.url));
 const defaults = {
   maxFileSize: 25 * MiB, maxRows: 100_000, maxColumns: 200, maxCells: 2_000_000,
   retentionMinutes: 60, maxConcurrent: 2, maxStored: 20, timeoutMs: 120_000,
@@ -169,13 +170,20 @@ export function createDatasetService(options = {}) {
     return value;
   }
 
+  // Another sheet is planned by rules in Python; the id must be a known sheet.
+  function sheetChoice(input, job) {
+    if (input.sheet_id === undefined || input.sheet_id === job.analysis.dashboard.sheet_id) return {};
+    if (typeof input.sheet_id !== 'string' || !job.dataset.sheets.some(sheet => sheet.id === input.sheet_id)) throw fail('INVALID_SHEET', 'ไม่พบชีตที่เลือก');
+    return { sheet_id: input.sheet_id, filename: job.dataset.filename };
+  }
+
   async function queryDashboard(request, job) {
     if (!job.analysis?.dashboard || job.status === 'processing') throw fail('ANALYSIS_NOT_READY', 'Dashboard ยังไม่พร้อม กรุณารอให้วิเคราะห์เสร็จ', 409);
     const input = await jsonBody(request, 32_768);
     const filters = parseFilters(input.filters);
     if (activePreviews >= config.maxPreviews) throw fail('BUSY', 'กำลังคำนวณ Dashboard กรุณาลองอีกครั้งในอีกสักครู่', 429);
     activePreviews++;
-    try { return reply(await runDashboard(job, { spec: job.analysis.dashboard, profiles: job.analysis.profiles, filters, include_options: input.options === true }, request.signal)); }
+    try { return reply(await runDashboard(job, { spec: job.analysis.dashboard, profiles: job.analysis.profiles, filters, include_options: input.options === true, ...sheetChoice(input, job) }, request.signal)); }
     finally { activePreviews--; }
   }
 
@@ -189,7 +197,7 @@ export function createDatasetService(options = {}) {
     activeExports++;
     const created = [];
     try {
-      const result = await runDashboard(job, { spec: job.analysis.dashboard, profiles: job.analysis.profiles, filters }, request.signal);
+      const result = await runDashboard(job, { spec: job.analysis.dashboard, profiles: job.analysis.profiles, filters, ...sheetChoice(input, job) }, request.signal);
       const document = dashboardDocument(job, result);
       const base = sanitizeFilename(job.dataset.filename).replace(/\.[^.]+$/, '');
       if (input.format === 'html') return download(Buffer.from(renderDashboardHtml(document), 'utf8'), `${base}-dashboard.html`, 'text/html; charset=utf-8');
@@ -324,20 +332,21 @@ export function createDatasetService(options = {}) {
       } catch (error) {
         if (job.controller.signal.aborted) throw error;
         analysis.ai.dashboard = 'rejected';
+        console.warn(JSON.stringify({ event: 'ai_dashboard_rejected', code: error.code || 'UNKNOWN' }));
       }
     }
     advance(job, 'dashboard', 90);
     if (analysis.ai.status === 'complete') {
       const executive = analysis.report.sections.find(section => section.id === 'executive_summary');
-      if (executive) executive.paragraphs = [`บทสรุปจาก AI: ${analysis.ai.summary}`, ...executive.paragraphs.map(paragraph => `ผลคำนวณ: ${paragraph}`)];
+      if (executive && analysis.ai.summary) executive.paragraphs = [analysis.ai.summary, ...executive.paragraphs];
       const findings = analysis.report.sections.find(section => section.id === 'key_findings');
       if (findings) {
-        findings.paragraphs.push(...analysis.ai.insights.map(item => `AI — ${item.title}: ${item.description}`));
+        findings.paragraphs.push(...analysis.ai.insights.map(item => `${item.title}: ${item.description}`));
         findings.evidence_ids = [...new Set([...findings.evidence_ids, ...analysis.ai.insights.flatMap(item => item.evidence_ids)])];
       }
       const recommendations = analysis.report.sections.find(section => section.id === 'recommendations');
       if (recommendations) {
-        recommendations.paragraphs.push(...analysis.ai.recommendations.map(item => `ข้อเสนอแนะจาก AI: ${item.text}`));
+        recommendations.paragraphs.push(...analysis.ai.recommendations.map(item => item.text));
         recommendations.evidence_ids = [...new Set([...recommendations.evidence_ids, ...analysis.ai.recommendations.flatMap(item => item.evidence_ids)])];
       }
     }
@@ -401,6 +410,12 @@ export function createDatasetService(options = {}) {
             job.progress = Math.max(job.progress, Math.min(config.autoAnalyze ? 35 : 99, Math.max(0, config.autoAnalyze ? 5 + event.progress * 0.3 : event.progress)));
           }, config.timeoutMs, job.controller.signal);
           if (jobs.has(id)) job.dataset = result;
+          // A BOQ comparison workbook also gets the benchmark report; it needs the original file.
+          if (jobs.has(id)) {
+            const html = join(directory, 'boq-report.html');
+            const boq = await worker(job, [input, filename, html], undefined, config.timeoutMs, job.controller.signal, boqWorkerPath).catch(error => { if (job.controller.signal.aborted) throw error; return null; });
+            if (boq?.mode === 'boq') job.boq = { html, vendors: boq.vendors, benchmark: boq.benchmark, headline: boq.headline };
+          }
           await rm(input, { force: true });
           if (!jobs.has(id)) return;
           if (config.autoAnalyze) await analyzeDataset(job);
@@ -501,7 +516,7 @@ export function createDatasetService(options = {}) {
         if (request.method === 'POST') { await sweep(); return await upload(request); }
         throw fail('METHOD_NOT_ALLOWED', 'Method not allowed', 405);
       }
-      const match = /^\/api\/datasets\/([A-Za-z0-9_-]{32})(\/(?:rows|analyze|export|dashboard|export-dashboard))?$/.exec(url.pathname);
+      const match = /^\/api\/datasets\/([A-Za-z0-9_-]{32})(\/(?:rows|analyze|export|dashboard|export-dashboard|boq-report))?$/.exec(url.pathname);
       if (!match) throw fail('NOT_FOUND', 'ไม่พบชุดข้อมูล', 404);
       const id = match[1];
       const job = jobs.get(id);
@@ -512,7 +527,12 @@ export function createDatasetService(options = {}) {
       if (match[2] === '/dashboard' && request.method === 'POST') return await queryDashboard(request, job);
       if (match[2] === '/export-dashboard' && request.method === 'POST') return await exportDashboard(request, job);
       if (request.method !== 'GET') throw fail('METHOD_NOT_ALLOWED', 'Method not allowed', 405);
-      if (!match[2]) return reply({ id, status: job.status, stage: job.stage, progress: job.progress, ...(job.dataset ? { dataset: job.dataset } : {}), ...(job.analysis ? { analysis: job.analysis } : {}), ...(job.error ? { error: job.error } : {}) });
+      if (!match[2]) return reply({ id, status: job.status, stage: job.stage, progress: job.progress, ...(job.dataset ? { dataset: job.dataset } : {}), ...(job.analysis ? { analysis: job.analysis } : {}), ...(job.boq ? { boq: { vendors: job.boq.vendors, benchmark: job.boq.benchmark, headline: job.boq.headline } } : {}), ...(job.error ? { error: job.error } : {}) });
+      if (match[2] === '/boq-report') {
+        if (!job.boq) throw fail('NOT_FOUND', 'ไฟล์นี้ไม่มีรายงานเปรียบเทียบ BOQ', 404);
+        // Engine-rendered HTML shown in a sandboxed frame: no scripts, no remote resources.
+        return new Response(await readFile(job.boq.html), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:", 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+      }
       if (match[2] === '/export') return await exportDataset(request, url, job);
       if (match[2] === '/analyze') throw fail('METHOD_NOT_ALLOWED', 'Method not allowed', 405);
       if (!job.dataset) throw fail('DATASET_NOT_READY', job.status === 'error' ? 'อ่านไฟล์ไม่สำเร็จ กรุณาอัปโหลดใหม่' : 'กำลังอ่านไฟล์ กรุณารอสักครู่', 409);

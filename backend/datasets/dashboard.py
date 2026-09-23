@@ -51,13 +51,16 @@ def _finite(value):
 # ---------------------------------------------------------------- validation
 
 def validate(spec, profiles):
-    """Return a normalised spec or raise INVALID_SPEC. Every rule the renderer relies on lives here."""
+    """Return a normalised spec or raise INVALID_SPEC. Every rule the renderer relies on lives here.
+    An AI plan keeps its valid items and drops the rest; a rule-based plan must be entirely valid."""
+    from worker import DatasetError
     if not isinstance(spec, dict):
         _fail("INVALID_SPEC", "รูปแบบ Dashboard ไม่ถูกต้อง")
     profile = next((p for p in profiles if p["sheet_id"] == spec.get("sheet_id")), None)
     if profile is None:
         _fail("INVALID_SPEC", "Dashboard อ้างอิงชีตที่ไม่มีอยู่")
     columns = {column["key"]: column for column in profile["columns"]}
+    lenient = spec.get("source") == "ai"
 
     def column(key, roles, optional=False):
         if key is None and optional:
@@ -68,14 +71,25 @@ def validate(spec, profiles):
             _fail("INVALID_SPEC", f"คอลัมน์ {columns[key]['name']} ไม่เหมาะกับการใช้งานนี้")
         return key
 
-    def items(name, limit):
+    def collect(name, limit, build):
         value = spec.get(name) or []
         if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
             _fail("INVALID_SPEC", "รูปแบบ Dashboard ไม่ถูกต้อง")
-        return value[:limit]
+        built, seen = [], set()
+        for item in value[:limit]:
+            try:
+                entry = build(item)
+            except DatasetError:
+                if not lenient:
+                    raise
+                continue
+            signature = entry.pop("signature")
+            if signature not in seen:
+                seen.add(signature)
+                built.append(entry)
+        return built
 
-    kpis, seen = [], set()
-    for item in items("kpis", MAX_KPIS):
+    def kpi(item):
         agg = item.get("agg")
         if agg not in KPI_AGGS:
             _fail("INVALID_SPEC", "วิธีรวมค่าของ KPI ไม่ถูกต้อง")
@@ -85,14 +99,10 @@ def validate(spec, profiles):
             key = column(item.get("column"), ("dimension", "identifier", "attribute", "time"))
         else:
             key = column(item.get("column"), ("measure",))
-        if (agg, key) in seen:
-            continue
-        seen.add((agg, key))
-        default = "จำนวนแถว" if key is None else f"{AGG_LABELS[agg]} {columns[key]['name']}"
-        kpis.append({"id": f"k{len(kpis) + 1}", "label": _label(item.get("label"), 80) or default, "column": key, "agg": agg})
+        default = "จำนวนรายการ" if key is None else f"{AGG_LABELS[agg]} {columns[key]['name']}"
+        return {"signature": (agg, key), "label": _label(item.get("label"), 80) or default, "column": key, "agg": agg}
 
-    charts, seen = [], set()
-    for item in items("charts", MAX_CHARTS):
+    def chart(item):
         kind = item.get("type")
         if kind not in CHART_TYPES:
             _fail("INVALID_SPEC", "ชนิดกราฟไม่รองรับ")
@@ -119,25 +129,21 @@ def validate(spec, profiles):
                 agg = "count"
             elif agg not in CHART_AGGS or agg == "count":
                 agg = "sum" if columns[y].get("meaning") in ("money", "quantity") else "avg"
-        signature = (kind, x, y, agg)
-        if signature in seen:
-            continue
-        seen.add(signature)
-        charts.append({"id": f"c{len(charts) + 1}", "type": kind, "title": _label(item.get("title"), 120) or _chart_title(kind, columns, x, y, agg),
-                       "x": x, "y": y, "agg": agg, "grain": grain, "limit": limit})
+        return {"signature": (kind, x, y, agg), "type": kind, "title": _label(item.get("title"), 120) or _chart_title(kind, columns, x, y, agg),
+                "x": x, "y": y, "agg": agg, "grain": grain, "limit": limit}
 
-    filters, seen = [], set()
     kinds = {"dimension": "category", "time": "date", "measure": "number"}
-    for item in items("filters", MAX_FILTERS):
-        key = column(item.get("column"), tuple(kinds))
-        if key in seen:
-            continue
-        seen.add(key)
-        filters.append({"id": f"f{len(filters) + 1}", "column": key, "kind": kinds[columns[key]["role"]]})
 
+    def filter_item(item):
+        key = column(item.get("column"), tuple(kinds))
+        return {"signature": key, "column": key, "kind": kinds[columns[key]["role"]]}
+
+    kpis = [{"id": f"k{index}", **entry} for index, entry in enumerate(collect("kpis", MAX_KPIS, kpi), 1)]
+    charts = [{"id": f"c{index}", **entry} for index, entry in enumerate(collect("charts", MAX_CHARTS, chart), 1)]
+    filters = [{"id": f"f{index}", **entry} for index, entry in enumerate(collect("filters", MAX_FILTERS, filter_item), 1)]
     if not kpis and not charts:
         _fail("INVALID_SPEC", "Dashboard ต้องมี KPI หรือกราฟอย่างน้อยหนึ่งรายการ")
-    return {"version": VERSION, "source": "ai" if spec.get("source") == "ai" else "rules", "sheet_id": profile["sheet_id"],
+    return {"version": VERSION, "source": "ai" if lenient else "rules", "sheet_id": profile["sheet_id"],
             "title": _label(spec.get("title"), 120) or f"Dashboard · {profile['sheet_name']}",
             "description": _label(spec.get("description"), 400), "kpis": kpis, "charts": charts, "filters": filters}
 
@@ -154,39 +160,52 @@ def _chart_title(kind, columns, x, y, agg):
 
 # ------------------------------------------------------------- rule-based plan
 
-def plan(profiles, filename=""):
-    """Deterministic dashboard used when AI is off, over budget or returns an invalid spec."""
+SUMMARY_SHEET = re.compile(r"summary|สรุป|overview|dashboard|ภาพรวม", re.I)
+
+
+def plan(profiles, filename="", sheet_id=None):
+    """Deterministic dashboard used when AI is off, over budget or returns an invalid spec,
+    and for any sheet the user picks later. `sheet_id` forces the sheet."""
     def score(profile):
         roles = [column.get("role") for column in profile["columns"]]
-        return ("measure" in roles, "dimension" in roles or "time" in roles, profile["rows_count"])
-    profile = max(profiles, key=score)
+        # A summary sheet is what a reader wants first, even when detail sheets are longer.
+        return ("measure" in roles, bool(SUMMARY_SHEET.search(profile["sheet_name"])), "dimension" in roles or "time" in roles or "attribute" in roles, profile["rows_count"])
+    candidates = [p for p in profiles if p["sheet_id"] == sheet_id] if sheet_id else profiles
+    if not candidates:
+        _fail("INVALID_SPEC", "ไม่พบชีตที่เลือก")
+    profile = max(candidates, key=score)
     columns = profile["columns"]
-    rank = {"money": 0, "quantity": 1}
+    # Amounts that add up come first; per-unit prices are averaged and shown last.
+    rank = {"money": 0, "quantity": 1, None: 2, "score": 3, "percent": 3, "price": 4}
     measures = sorted((c for c in columns if c.get("role") == "measure"), key=lambda c: (rank.get(c.get("meaning"), 2), c["missing_count"]))
     dimensions = sorted((c for c in columns if c.get("role") == "dimension" and c["unique_count"] > 1), key=lambda c: (c["unique_count"] > 12, c["missing_count"], c["unique_count"]))
     times = [c for c in columns if c.get("role") == "time"]
-    attributes = [c for c in columns if c.get("role") == "attribute" and c.get("semantic_type") == "text" and c["unique_count"] > 12]
+    labels = sorted((c for c in columns if c.get("role") == "attribute" and c.get("semantic_type") == "text" and c["unique_count"] > 12), key=lambda c: c["missing_count"])
     agg = lambda measure: "sum" if measure.get("meaning") in ("money", "quantity") else "avg"
     main = measures[0] if measures else None
+    second = next((m for m in measures[1:] if m.get("meaning") == main.get("meaning")), None) if main else None
 
-    kpis = [{"column": None, "agg": "count", "label": "จำนวนแถว"}]
-    kpis += [{"column": m["key"], "agg": agg(m)} for m in measures[:3]]
+    kpis = [{"column": None, "agg": "count", "label": "จำนวนรายการ"}]
+    kpis += [{"column": m["key"], "agg": agg(m)} for m in measures[:4]]
     if len(kpis) < 5 and dimensions:
         kpis.append({"column": dimensions[0]["key"], "agg": "count_distinct"})
 
     charts = []
     if times:
         charts.append({"type": "area" if main and agg(main) == "sum" else "line", "x": times[0]["key"], "y": main and main["key"], "agg": main and agg(main)})
+    if main and labels:
+        # Ranked items: the clearest view of a summary table or a long item list.
+        charts.append({"type": "hbar", "x": labels[0]["key"], "y": main["key"], "agg": agg(main), "limit": 15})
     for dimension in dimensions[:2]:
         charts.append({"type": "bar", "x": dimension["key"], "y": main and main["key"], "agg": main and agg(main), "limit": 12})
     # A share chart only adds information for a dimension the bars do not already show.
-    small = next((d for d in dimensions[2:] if d["unique_count"] <= 8), None)
+    small = next((d for d in dimensions[2:] if d["unique_count"] <= 8), None) or (dimensions[0] if len(dimensions) == 1 and dimensions[0]["unique_count"] <= 8 and labels else None)
     if small:
         share = main and agg(main) == "sum"
         charts.append({"type": "donut", "x": small["key"], "y": main["key"] if share else None, "agg": "sum" if share else "count"})
-    if main and attributes:
-        charts.append({"type": "hbar", "x": attributes[0]["key"], "y": main["key"], "agg": agg(main), "limit": 10})
-    if main:
+    if second and labels:
+        charts.append({"type": "hbar", "x": labels[0]["key"], "y": second["key"], "agg": agg(second), "limit": 15})
+    if main and profile["rows_count"] >= 30 and not labels:
         charts.append({"type": "histogram", "x": main["key"]})
     measure_keys = {m["key"] for m in measures}
     pair = next((c for c in profile.get("correlations", []) if abs(c["value"]) >= .3 and {c["x"], c["y"]} <= measure_keys), None)
@@ -376,14 +395,26 @@ def run(sqlite_path, payload):
         _fail("INVALID_REQUEST", "รูปแบบคำขอ Dashboard ไม่ถูกต้อง")
     if not Path(sqlite_path).is_file():
         _fail("NOT_FOUND", "ไม่พบชุดข้อมูลนี้ กรุณาอัปโหลดใหม่")
-    spec = validate(payload.get("spec"), payload["profiles"])
+    requested = payload.get("sheet_id")
+    if requested and requested != (payload.get("spec") or {}).get("sheet_id"):
+        # Another sheet: plan it by rules; no AI request is made for sheet switching.
+        spec = plan(payload["profiles"], payload.get("filename", ""), requested)
+    else:
+        spec = validate(payload.get("spec"), payload["profiles"])
     profile = next(p for p in payload["profiles"] if p["sheet_id"] == spec["sheet_id"])
     columns = {column["key"]: column for column in profile["columns"]}
     where, params = filter_clause(columns, payload.get("filters"), referenced(spec))
-    table = f'"data_{spec["sheet_id"]}"'
     connection = sqlite3.connect(Path(sqlite_path).resolve().as_uri() + "?mode=ro", uri=True)
     try:
-        result = {"spec": spec, "filters": payload.get("filters") or [],
+        metadata = json.loads(connection.execute("SELECT value FROM metadata WHERE key='dataset'").fetchone()[0])
+        sheet = next(item for item in metadata["sheets"] if item["id"] == spec["sheet_id"])
+        summary = [int(row) for row in sheet.get("summary_rows", [])]
+        table = f'"data_{spec["sheet_id"]}"'
+        if summary:
+            # Subtotal / total / VAT lines would double every sum; the view hides them from all queries.
+            connection.execute(f"CREATE TEMP VIEW dashboard_rows AS SELECT * FROM {table} WHERE row_number NOT IN ({', '.join(map(str, summary))})")
+            table = "dashboard_rows"
+        result = {"spec": spec, "filters": payload.get("filters") or [], "summary_rows_excluded": len(summary),
                   "rows_total": connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0],
                   "rows_matched": connection.execute(f"SELECT COUNT(*) FROM {table}{_where(where)}", params).fetchone()[0],
                   "kpis": [], "charts": []}

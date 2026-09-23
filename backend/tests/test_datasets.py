@@ -161,7 +161,7 @@ class DatasetTests(unittest.TestCase):
         self.assertIsNone(rows[-1]["values"]["c1"])
         warnings = " ".join(result["sheets"][0]["warnings"])
         self.assertIn("ไม่มีค่าที่คำนวณไว้", warnings)
-        self.assertIn("ยอดรวม", warnings)
+        self.assertIn("แถวสรุปยอด", warnings)
         self.assertTrue(preview(self.database, {"sheet": "s1"})["rows"][0]["values"]["c1"])
 
     def test_xlsx_invalid_sheet_rolls_back_other_sheets(self):

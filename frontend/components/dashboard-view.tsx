@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { EChartsType } from 'echarts';
-import { Download, FileCode2, Filter, Info, LoaderCircle, RefreshCw, RotateCcw, Sparkles, Table2, X } from 'lucide-react';
+import { Download, FileCode2, Filter, Lightbulb, LoaderCircle, RefreshCw, RotateCcw, Table2, X } from 'lucide-react';
 import { EChart, type ChartClick } from '@/components/echart';
 import { DataPreview } from '@/components/data-preview';
 import { bucketRange, exportDashboard, queryDashboard, type DashboardFilter, type DashboardResult, type DashboardSpec, type FilterOption } from '@/lib/dashboard';
@@ -52,11 +52,8 @@ function RangeFilter({ label, kind, option, current, onChange }: { label: string
   </fieldset>;
 }
 
-export function DashboardView({ id, dataset, analysis, spec }: { id: string; dataset: Dataset; analysis: DatasetAnalysis; spec: DashboardSpec }) {
-  const profile = analysis.profiles.find(item => item.sheet_id === spec.sheet_id);
-  const columns = useMemo(() => new Map<string, ProfileColumn>((profile?.columns || []).map(column => [column.key, column])), [profile]);
-  const sheet = dataset.sheets.find(item => item.id === spec.sheet_id) || dataset.sheets[0];
-  const name = useCallback((key: string | null) => (key ? columns.get(key)?.name || key : ''), [columns]);
+export function DashboardView({ id, dataset, analysis, spec: planned }: { id: string; dataset: Dataset; analysis: DatasetAnalysis; spec: DashboardSpec }) {
+  const [sheetId, setSheetId] = useState(planned.sheet_id);
   const [filters, setFilters] = useState<DashboardFilter[]>([]);
   const [result, setResult] = useState<DashboardResult | null>(null);
   const [options, setOptions] = useState<Record<string, FilterOption>>({});
@@ -67,6 +64,12 @@ export function DashboardView({ id, dataset, analysis, spec }: { id: string; dat
   const [tables, setTables] = useState<Record<string, boolean>>({});
   const instances = useRef(new Map<string, EChartsType>());
   const optionsLoaded = useRef(false);
+  // Another sheet is planned by rules on the server; its spec arrives with the result.
+  const spec = result?.spec.sheet_id === sheetId ? result.spec : sheetId === planned.sheet_id ? planned : null;
+  const profile = analysis.profiles.find(item => item.sheet_id === sheetId);
+  const columns = useMemo(() => new Map<string, ProfileColumn>((profile?.columns || []).map(column => [column.key, column])), [profile]);
+  const sheet = dataset.sheets.find(item => item.id === sheetId) || dataset.sheets[0];
+  const name = useCallback((key: string | null) => (key ? columns.get(key)?.name || key : ''), [columns]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -74,7 +77,7 @@ export function DashboardView({ id, dataset, analysis, spec }: { id: string; dat
       setLoading(true); setError('');
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          const next = await queryDashboard(id, filters, !optionsLoaded.current, controller.signal);
+          const next = await queryDashboard(id, filters, !optionsLoaded.current, controller.signal, sheetId === planned.sheet_id ? undefined : sheetId);
           if (controller.signal.aborted) return;
           if (next.options) { optionsLoaded.current = true; setOptions(next.options); }
           setResult(next); setLoading(false);
@@ -83,22 +86,27 @@ export function DashboardView({ id, dataset, analysis, spec }: { id: string; dat
           if (controller.signal.aborted) return;
           // The server runs two dashboard queries at once; back off briefly when busy.
           if (reason instanceof DatasetError && reason.status === 429 && attempt < 2) { await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1))); continue; }
-          setError(reason instanceof Error ? reason.message : 'คำนวณ Dashboard ไม่สำเร็จ'); setLoading(false);
+          setError(reason instanceof Error ? reason.message : 'คำนวณแดชบอร์ดไม่สำเร็จ'); setLoading(false);
           return;
         }
       }
     }, 180);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [id, filters, retry]);
+  }, [id, filters, retry, sheetId, planned.sheet_id]);
+
+  function changeSheet(value: string) {
+    optionsLoaded.current = false;
+    setSheetId(value); setFilters([]); setOptions({}); setTables({}); setResult(null);
+  }
 
   const setFilter = useCallback((column: string, value: Range | { values: string[] } | null) => {
     setFilters(current => [...current.filter(item => item.column !== column), ...(value ? [{ column, ...value } as DashboardFilter] : [])]);
   }, []);
 
-  const charts = useMemo(() => spec.charts.map(chart => {
-    const computed = result?.charts.find(item => item.id === chart.id);
-    return { ...chart, x_name: name(chart.x), y_name: chart.y ? name(chart.y) : 'จำนวนแถว', data: [], ...computed } as ComputedChart;
-  }), [spec, result, name]);
+  const charts = useMemo(() => (spec?.charts || []).map(chart => {
+    const computed = result?.spec.sheet_id === sheetId ? result.charts.find(item => item.id === chart.id) : undefined;
+    return { ...chart, x_name: name(chart.x), y_name: chart.y ? name(chart.y) : 'จำนวนรายการ', data: [], ...computed } as ComputedChart;
+  }), [spec, result, sheetId, name]);
   const chartOptions = useMemo(() => new Map(charts.map(chart => [chart.id, chartOption(chart)])), [charts]);
 
   function drill(chart: ComputedChart, event: ChartClick) {
@@ -114,89 +122,93 @@ export function DashboardView({ id, dataset, analysis, spec }: { id: string; dat
     try {
       // Pictures only decorate the PDF; its numbers are recomputed on the server.
       const images = format === 'pdf' ? [...instances.current].map(([chartId, instance]) => ({ id: chartId, data: instance.getDataURL({ type: 'jpeg', pixelRatio: 2, backgroundColor: '#ffffff' }) })).filter(item => item.data.startsWith('data:image/jpeg')) : [];
-      await exportDashboard(id, format, filters, dataset.filename, images);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'ส่งออกไม่สำเร็จ'); }
+      await exportDashboard(id, format, filters, dataset.filename, images, sheetId === planned.sheet_id ? undefined : sheetId);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'ดาวน์โหลดไม่สำเร็จ'); }
     finally { setExporting(''); }
   }
 
-  const ai = analysis.ai?.status === 'complete' ? analysis.ai : null;
+  const summary = analysis.ai?.status === 'complete' ? analysis.ai : null;
   const evidence = new Map(analysis.insights.map(item => [item.id, item]));
-  const insights = ai?.insights?.length ? ai.insights.map(item => ({ title: item.title, description: item.description, ids: item.evidence_ids }))
-    : analysis.insights.slice(0, 6).map(item => ({ title: item.title, description: item.description, ids: [item.id] }));
-  const extraFilters = filters.filter(item => !spec.filters.some(entry => entry.column === item.column));
-  const kpiValue = (kpiId: string) => result?.kpis.find(item => item.id === kpiId)?.value ?? null;
+  // Written observations when available; otherwise calculated findings for this sheet.
+  const insights = summary?.insights?.length && sheetId === planned.sheet_id ? summary.insights.map(item => ({ title: item.title, description: item.description, ids: item.evidence_ids }))
+    : analysis.insights.filter(item => item.evidence.sheet === sheet?.name || item.evidence.sheet === 'ทุกชีต').slice(0, 6).map(item => ({ title: item.title, description: item.description, ids: [item.id] }));
+  const kpiValue = (kpiId: string) => result?.spec.sheet_id === sheetId ? result.kpis.find(item => item.id === kpiId)?.value ?? null : null;
+  const extraFilters = filters.filter(item => !spec?.filters.some(entry => entry.column === item.column));
+  const ready = Boolean(result && result.spec.sheet_id === sheetId);
 
   return <div className="dash">
     <header className="dash-header">
       <div>
-        <span className={`dash-source ${spec.source}`}><Sparkles size={13} aria-hidden="true" />{spec.source === 'ai' ? 'AI วางแผน Dashboard' : 'Dashboard อัตโนมัติ'}</span>
-        <h2>{spec.title}</h2>
-        {spec.description && <p>{spec.description}</p>}
-        <small>{dataset.filename} · ชีต {sheet?.name} · วิเคราะห์เมื่อ {new Date(analysis.generated_at).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })}</small>
+        <h2>{spec?.title || `ภาพรวมข้อมูล ${sheet?.name || ''}`}</h2>
+        {spec?.description && <p>{spec.description}</p>}
+        <div className="dash-meta">
+          <label>ชีต <select aria-label="เลือกชีตที่ต้องการดู" value={sheetId} onChange={event => changeSheet(event.target.value)}>{dataset.sheets.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          <span>{dataset.filename}</span>
+          <span>วิเคราะห์เมื่อ {new Date(analysis.generated_at).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })}</span>
+        </div>
       </div>
       <div className="dash-actions">
-        <button className="data-button secondary compact" disabled={!!exporting || !result} onClick={() => void download('html')}>{exporting === 'html' ? <LoaderCircle size={15} className="data-spin" /> : <FileCode2 size={15} />}Export HTML</button>
-        <button className="data-button primary compact" disabled={!!exporting || !result} onClick={() => void download('pdf')}>{exporting === 'pdf' ? <LoaderCircle size={15} className="data-spin" /> : <Download size={15} />}Export PDF</button>
+        <button className="office-button" disabled={!!exporting || !ready} onClick={() => void download('html')}>{exporting === 'html' ? <LoaderCircle size={15} className="data-spin" /> : <FileCode2 size={15} />}ดาวน์โหลด HTML</button>
+        <button className="office-button primary" disabled={!!exporting || !ready} onClick={() => void download('pdf')}>{exporting === 'pdf' ? <LoaderCircle size={15} className="data-spin" /> : <Download size={15} />}ดาวน์โหลด PDF</button>
       </div>
     </header>
 
-    {spec.filters.length > 0 && <section className="dash-filters" aria-label="ตัวกรอง Dashboard">
+    {spec && spec.filters.length > 0 && <section className="dash-filters" aria-label="ตัวกรอง">
       <span className="dash-filters-title"><Filter size={15} aria-hidden="true" />ตัวกรอง</span>
       {spec.filters.map(item => {
         const current = filters.find(filter => filter.column === item.column);
         if (item.kind === 'category') return <CategoryFilter key={item.id} label={name(item.column)} option={options[item.id]} selected={current && 'values' in current ? current.values : []} onChange={values => setFilter(item.column, values.length ? { values } : null)} />;
         return <RangeFilter key={item.id} label={name(item.column)} kind={item.kind} option={options[item.id]} current={current} onChange={value => setFilter(item.column, value)} />;
       })}
-      {filters.length > 0 && <button className="data-text-button dash-reset" onClick={() => setFilters([])}><RotateCcw size={14} />ล้างตัวกรองทั้งหมด</button>}
+      {filters.length > 0 && <button className="data-text-button dash-reset" onClick={() => setFilters([])}><RotateCcw size={14} />ล้างตัวกรอง</button>}
     </section>}
     {extraFilters.length > 0 && <div className="dash-chips" aria-label="ตัวกรองจากการคลิกกราฟ">
       {extraFilters.map(item => { const text = describeFilter(item, columns.get(item.column)); return <span key={item.column} className="dash-chip">{text.label}: {text.text}<button aria-label={`ลบตัวกรอง ${text.label}`} onClick={() => setFilter(item.column, null)}><X size={12} /></button></span>; })}
-      {spec.filters.length === 0 && <button className="data-text-button" onClick={() => setFilters([])}>ล้างตัวกรอง</button>}
+      {spec?.filters.length === 0 && <button className="data-text-button" onClick={() => setFilters([])}>ล้างตัวกรอง</button>}
     </div>}
 
     <div className="dash-status" aria-live="polite">
-      {loading ? <><LoaderCircle size={14} className="data-spin" />กำลังคำนวณจากข้อมูลจริง…</> : result && <>ใช้ข้อมูล {formatFull(result.rows_matched)} จาก {formatFull(result.rows_total)} แถว{filters.length ? ' ตามตัวกรอง' : ''} · คลิกแท่งกราฟหรือจุดเวลาเพื่อกรองข้อมูล</>}
+      {loading ? <><LoaderCircle size={14} className="data-spin" />กำลังคำนวณ…</> : ready && result && <>ใช้ข้อมูล {formatFull(result.rows_matched)} จาก {formatFull(result.rows_total)} แถว{filters.length ? ' ตามตัวกรอง' : ''} · คลิกกราฟเพื่อกรองข้อมูล{result.summary_rows_excluded ? ` · ไม่นับแถวสรุปยอด ${formatFull(result.summary_rows_excluded)} แถว (เช่น รวม, VAT) เพื่อไม่ให้ยอดซ้ำ` : ''}</>}
     </div>
-    {error && <div className="data-inline-error" role="alert"><p>{error}</p><button className="data-button secondary compact" onClick={() => setRetry(value => value + 1)}><RefreshCw size={14} />ลองอีกครั้ง</button></div>}
+    {error && <div className="data-inline-error" role="alert"><p>{error}</p><button className="office-button" onClick={() => setRetry(value => value + 1)}><RefreshCw size={14} />ลองอีกครั้ง</button></div>}
 
-    <section className="dash-kpis" aria-label="ตัวชี้วัดหลัก">
+    {spec && <section className="dash-kpis" aria-label="ตัวเลขสรุป">
       {spec.kpis.map(kpi => {
         const value = kpiValue(kpi.id);
         return <article key={kpi.id} className={loading ? 'loading' : ''}>
           <span>{kpi.label}</span>
-          <strong title={formatFull(value)}>{result ? formatNumber(value, columns.get(kpi.column || '')?.meaning, kpi.agg) : '…'}</strong>
+          <strong title={formatFull(value)}>{ready ? formatNumber(value, columns.get(kpi.column || '')?.meaning, kpi.agg) : '…'}</strong>
           <small>{kpi.column ? `${AGG_NAMES[kpi.agg]} · ${name(kpi.column)}` : 'นับทุกแถวที่ตรงตัวกรอง'}</small>
         </article>;
       })}
-    </section>
+    </section>}
 
     <section className="dash-grid" aria-label="กราฟ">
       {charts.map(chart => {
         const option = chartOptions.get(chart.id);
         const rows = [...(chart.data || []), ...(chart.others ? [{ x: chart.others.label, y: chart.others.y }] : [])];
-        const notes = [seriesName(chart), chart.grain ? GRAIN_NAMES[chart.grain] : '', chart.groups_total && chart.groups_total > (chart.data?.length || 0) ? `แสดง ${chart.data?.length} จาก ${formatFull(chart.groups_total)} กลุ่ม` : '', chart.sampled ? `ตัวอย่างจุดจาก ${formatFull(chart.points_total)} คู่` : ''].filter(Boolean);
-        return <article key={chart.id} className={`dash-panel${chart.type === 'line' || chart.type === 'area' ? ' wide' : ''}`}>
+        const notes = [seriesName(chart), chart.grain ? GRAIN_NAMES[chart.grain] : '', chart.groups_total && chart.groups_total > (chart.data?.length || 0) ? `แสดง ${chart.data?.length} อันดับแรกจาก ${formatFull(chart.groups_total)} รายการ` : '', chart.sampled ? `แสดงตัวอย่างจุดจาก ${formatFull(chart.points_total)} คู่` : ''].filter(Boolean);
+        return <article key={chart.id} className={`dash-panel${chart.type === 'line' || chart.type === 'area' || chart.type === 'hbar' ? ' wide' : ''}`}>
           <div className="dash-panel-head">
             <div><h3>{chart.title}</h3><p>{notes.join(' · ')}</p></div>
             <button className="data-icon-button" aria-pressed={!!tables[chart.id]} aria-label={`แสดงตัวเลขของ ${chart.title}`} title="ดูตัวเลข" onClick={() => setTables(current => ({ ...current, [chart.id]: !current[chart.id] }))}><Table2 size={16} /></button>
           </div>
           {chart.error ? <p className="dash-empty">{chart.error}</p> : option ? <EChart option={option} label={`${chart.title} ${rows.length} รายการ`} onSelect={event => drill(chart, event)} onReady={instance => { if (instance) instances.current.set(chart.id, instance); else instances.current.delete(chart.id); }} /> : <p className="dash-empty">{loading ? 'กำลังคำนวณ…' : 'ไม่มีข้อมูลตามตัวกรองนี้'}</p>}
-          {tables[chart.id] && rows.length > 0 && <div className="dash-mini-table"><table><thead><tr><th>{chart.x_name || 'กลุ่ม'}</th><th>{chart.type === 'scatter' ? chart.y_name : seriesName(chart)}</th></tr></thead><tbody>{rows.slice(0, 100).map((row, index) => <tr key={index}><td>{formatFull(row.x)}</td><td>{formatFull(row.y)}</td></tr>)}</tbody></table></div>}
+          {tables[chart.id] && rows.length > 0 && <div className="dash-mini-table"><table><thead><tr><th>{chart.x_name || 'รายการ'}</th><th>{chart.type === 'scatter' ? chart.y_name : seriesName(chart)}</th></tr></thead><tbody>{rows.slice(0, 100).map((row, index) => <tr key={index}><td>{formatFull(row.x)}</td><td>{formatFull(row.y)}</td></tr>)}</tbody></table></div>}
         </article>;
       })}
     </section>
 
-    <section className="dash-insights" aria-label="Key Insights">
-      <div className="dash-section-head"><h3><Sparkles size={17} aria-hidden="true" />Key Insights</h3><span>{ai ? `วิเคราะห์โดย ${ai.model} จากข้อมูลทั้งหมด` : 'ข้อค้นพบจากการคำนวณ'} · ไม่เปลี่ยนตามตัวกรอง</span></div>
-      {ai?.summary && <p className="dash-summary">{ai.summary}</p>}
-      {!ai && analysis.ai?.message && <p className="dash-note"><Info size={13} aria-hidden="true" /> {analysis.ai.message}</p>}
+    {insights.length > 0 && <section className="dash-insights" aria-label="ข้อสังเกตสำคัญ">
+      <div className="dash-section-head"><h3><Lightbulb size={17} aria-hidden="true" />ข้อสังเกตสำคัญ</h3><span>สรุปจากข้อมูลทั้งไฟล์ · ไม่เปลี่ยนตามตัวกรอง</span></div>
+      {summary?.summary && sheetId === planned.sheet_id && <p className="dash-summary">{summary.summary}</p>}
       <ol>{insights.map((item, index) => <li key={index}><strong>{item.title}</strong><p>{item.description}</p>
-        <details><summary>หลักฐาน {item.ids.join(', ')}</summary>{item.ids.map(evidenceId => { const source = evidence.get(evidenceId); return source ? <p key={evidenceId}><b>{evidenceId}</b> {source.evidence.metric}: {formatFull(source.evidence.value)} · {source.evidence.method}</p> : null; })}</details>
+        <details><summary>ที่มาของตัวเลข</summary>{item.ids.map(evidenceId => { const source = evidence.get(evidenceId); return source ? <p key={evidenceId}>{source.evidence.sheet} · {source.evidence.metric}: {formatFull(source.evidence.value)} · {source.evidence.method}</p> : null; })}</details>
       </li>)}</ol>
-    </section>
+    </section>}
 
     {sheet && <section className="dash-data" aria-label="ข้อมูลตามตัวกรอง">
-      <div className="dash-section-head"><h3>ข้อมูลที่ใช้ใน Dashboard</h3><span>{filters.length ? 'แสดงเฉพาะแถวที่ตรงกับตัวกรอง' : 'ข้อมูลทุกแถวของชีตนี้'}</span></div>
+      <div className="dash-section-head"><h3>ข้อมูลในชีต {sheet.name}</h3><span>{filters.length ? 'แสดงเฉพาะแถวที่ตรงกับตัวกรอง' : 'ทุกแถวของชีตนี้'}</span></div>
       <DataPreview key={`${id}:${sheet.id}`} id={id} sheet={sheet} filters={filters} />
     </section>}
   </div>;

@@ -440,7 +440,7 @@ def export_dashboard_pdf(payload_path, output_path):
 
     insights = document.get("insights") or []
     if insights or document.get("ai_summary"):
-        story.append(text("Key Insights", "h"))
+        story.append(text("ข้อสังเกตสำคัญ", "h"))
         if document.get("ai_summary"):
             story.append(text(document["ai_summary"]))
         for item in insights:
@@ -450,7 +450,7 @@ def export_dashboard_pdf(payload_path, output_path):
     story.append(text("ข้อมูลประกอบกราฟ", "h"))
     for chart in document["charts"]:
         story.append(KeepTogether([text(chart.get("title", ""), "body"), data_table(chart, 25), Spacer(1, 6)]))
-    story.append(text("ตัวเลขทุกค่าคำนวณจากข้อมูลทุกแถวที่ตรงตามตัวกรอง ณ เวลาส่งออก ไม่ได้มาจาก AI", "small"))
+    story.append(text("ตัวเลขทุกค่าคำนวณจากข้อมูลทุกแถวที่ตรงตามตัวกรอง ณ เวลาส่งออก ไม่นับแถวสรุปยอดซ้ำ", "small"))
 
     def frame(canvas, doc):
         canvas.saveState()

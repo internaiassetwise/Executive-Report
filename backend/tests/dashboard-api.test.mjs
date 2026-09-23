@@ -67,11 +67,15 @@ test('an AI plan is accepted only after validation and the prompt carries no row
   assert.deepEqual(job.analysis.dashboard.kpis.map(k => [k.column, k.agg]), [['c3', 'sum'], [null, 'count']]);
 });
 
-test('an invalid AI plan falls back to the rule-based dashboard', async t => {
-  const handle = await context(t, fakeLlm({ ...aiPlan, kpis: [{ label: 'x', column: 'c1', agg: 'sum' }] }));
+test('an AI plan keeps its valid items and an unusable plan falls back to rules', async t => {
+  const handle = await context(t, fakeLlm({ ...aiPlan, kpis: [{ label: 'x', column: 'c1', agg: 'sum' }, ...aiPlan.kpis] }));
   const job = await ready(handle);
-  assert.equal(job.analysis.dashboard.source, 'rules');
-  assert.equal(job.analysis.ai.dashboard, 'rejected');
+  assert.equal(job.analysis.dashboard.source, 'ai');
+  assert.deepEqual(job.analysis.dashboard.kpis.map(k => k.column), ['c3', null], 'summing a text column is dropped');
+  const other = await context(t, fakeLlm({ ...aiPlan, sheet_id: 's9' }));
+  const fallback = await ready(other);
+  assert.equal(fallback.analysis.dashboard.source, 'rules');
+  assert.equal(fallback.analysis.ai.dashboard, 'rejected');
 });
 
 test('dashboard queries apply filters to every KPI and chart', async t => {

@@ -44,7 +44,8 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual((columns["region"]["role"], columns["region"]["semantic_type"]), ("dimension", "category"))
         self.assertEqual((columns["revenue"]["role"], columns["revenue"]["meaning"]), ("measure", "money"))
         self.assertEqual((columns["quantity"]["semantic_type"], columns["quantity"]["meaning"]), ("integer", "quantity"))
-        self.assertEqual(columns["customer"]["role"], "identifier")
+        # Unique names in a short table are labels for ranked charts, not IDs.
+        self.assertEqual(columns["customer"]["role"], "attribute")
 
     def test_a_text_column_named_amount_is_not_a_measure(self):
         analysis = self.analysed("amount,note\nhigh,a\nlow,b\nhigh,c\n")
@@ -114,8 +115,52 @@ class DashboardTests(unittest.TestCase):
                 validate(spec, analysis["profiles"])
             self.assertEqual(raised.exception.code, "INVALID_SPEC")
         with self.assertRaises(DatasetError) as raised:
-            self.query(analysis, filters=[{"column": "c6", "values": ["x"]}])  # not referenced by the spec
+            self.query(analysis, filters=[{"column": "c0", "values": ["x"]}])  # not referenced by the spec
         self.assertEqual(raised.exception.code, "INVALID_FILTER")
+
+    def test_summary_rows_are_excluded_and_summary_sheets_preferred(self):
+        book = openpyxl.Workbook()
+        detail = book.active
+        detail.title = "Detail"
+        detail.append(["No", "รายการ (Item)", "หน่วย", "ราคาของ RBP", "รวมปรับแล้ว", "หมายเหตุ"])
+        for i in range(40):
+            detail.append([i + 1, f"งาน {i}", "Kg", 100 + (i % 7) * 5, 1000 + i * 37, None if i % 5 else "ปรับ"])
+        summary = book.create_sheet("0_SUMMARY")
+        summary.append(["ลำดับ", "หมวดงาน/ตึก", "ราคาปรับแล้ว (บาท)", "ราคากลาง RBP (บาท)"])
+        for i, name in enumerate(["ST_A", "ST_B", "AR_A", "AR_B"], 1):
+            summary.append([i, name, i * 100, i * 90])
+        summary.append([None, "รวม Subtotal (Summary Item)", 1000, 900])
+        summary.append([None, "VAT 7%", 70, 63])
+        summary.append([None, "รวมราคาโครงการทั้งหมด (Grand Total)", 1070, 963])
+        path = self.root / "input.xlsx"
+        book.save(path)
+        dataset = ingest(path, self.database, "input.xlsx")
+        self.assertEqual(len(dataset["sheets"][1]["summary_rows"]), 3)
+        analysis = analyze(self.database)
+        detail_columns = {c["name"]: c for c in analysis["profiles"][0]["columns"]}
+        self.assertEqual(detail_columns["ราคาของ RBP"]["meaning"], "price")
+        self.assertEqual(detail_columns["รวมปรับแล้ว"]["meaning"], "money")
+        self.assertNotEqual(detail_columns["หน่วย"]["role"], "dimension")
+        self.assertNotEqual(detail_columns["หมายเหตุ"]["role"], "dimension")
+        spec = analysis["dashboard"]
+        self.assertEqual(spec["sheet_id"], "s1", "the summary sheet is planned first")
+        self.assertIn(spec["charts"][0]["type"], ("bar", "hbar"))
+        self.assertEqual(spec["charts"][0]["x"], "c1", "ranked by the building/category label")
+        result = self.query(analysis)
+        total = next(k for k in spec["kpis"] if k["agg"] == "sum")
+        self.assertEqual(next(k["value"] for k in result["kpis"] if k["id"] == total["id"]), 1000, "subtotal, VAT and grand total rows are not added again")
+        self.assertEqual(result["summary_rows_excluded"], 3)
+        other = run(self.database, {"spec": spec, "profiles": analysis["profiles"], "sheet_id": "s0"})
+        self.assertEqual(other["spec"]["sheet_id"], "s0")
+        self.assertEqual(other["spec"]["source"], "rules")
+
+    def test_ai_plans_keep_valid_items(self):
+        analysis = self.analysed(sales_csv())
+        spec = validate({"source": "ai", "sheet_id": "s0", "kpis": [{"column": "c2", "agg": "sum"}, {"column": "c4", "agg": "sum"}],
+                         "charts": [{"type": "line", "x": "c2", "y": "c4"}, {"type": "bar", "x": "c2", "y": "c4", "agg": "sum"}]}, analysis["profiles"])
+        self.assertEqual([k["column"] for k in spec["kpis"]], ["c4"])
+        self.assertEqual([c["type"] for c in spec["charts"]], ["bar"])
+        self.assertEqual(spec["source"], "ai")
 
     def test_preview_applies_dashboard_filters_with_search(self):
         self.csv(sales_csv())

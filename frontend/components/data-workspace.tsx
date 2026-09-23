@@ -2,21 +2,21 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ArrowRight, Check, ChevronRight, FileSpreadsheet, Info, LoaderCircle, Plus, ShieldCheck, Upload, X } from 'lucide-react';
+import { ArrowRight, Check, FileSpreadsheet, Info, LoaderCircle, Plus, ShieldCheck, Upload, X } from 'lucide-react';
 import { AccessGate } from '@/components/access-gate';
 import { DatasetResults } from '@/components/dataset-results';
 import { ACCESS_REQUIRED_EVENT, analyzeDataset, DatasetError, getDatasetConfig, getDatasetJob, removeDataset, uploadDataset, type DatasetConfig, type DatasetJob } from '@/lib/datasets';
 
 const SESSION_KEY = 'ai-data-analyst:dataset';
 const processingSteps = [
-  { key: 'uploading', name: 'Upload file', th: 'อัปโหลดและตรวจสอบไฟล์' },
-  { key: 'reading', name: 'Reading data', th: 'อ่านข้อมูลและโครงสร้างชีต' },
-  { key: 'understanding_columns', name: 'Understanding columns', th: 'ทำความเข้าใจหัวคอลัมน์' },
-  { key: 'detecting_types', name: 'Detecting data types', th: 'ตรวจจับชนิดข้อมูลแต่ละคอลัมน์' },
-  { key: 'patterns', name: 'Finding patterns', th: 'คำนวณสถิติและค้นหารูปแบบ' },
-  { key: 'ai', name: 'Generating insights', th: 'สร้างข้อค้นพบเชิงลึกด้วย AI' },
-  { key: 'dashboard', name: 'Creating dashboard', th: 'สร้าง Dashboard และกราฟ' },
-  { key: 'report', name: 'Creating report', th: 'จัดทำรายงานผู้บริหาร' },
+  { key: 'uploading', th: 'อัปโหลดไฟล์' },
+  { key: 'reading', th: 'อ่านข้อมูลทุกชีต' },
+  { key: 'understanding_columns', th: 'ตรวจหัวคอลัมน์' },
+  { key: 'detecting_types', th: 'ตรวจชนิดข้อมูล' },
+  { key: 'patterns', th: 'คำนวณตัวเลขและสถิติ' },
+  { key: 'ai', th: 'สรุปผลการวิเคราะห์' },
+  { key: 'dashboard', th: 'จัดทำแดชบอร์ด' },
+  { key: 'report', th: 'จัดทำรายงาน' },
 ] as const;
 
 function getStepIndex(uploading: boolean, stage: string | undefined): number {
@@ -188,130 +188,70 @@ export function DataWorkspace() {
   const jobError = job?.status === 'error' ? job.error?.message || 'อ่านข้อมูลไม่สำเร็จ กรุณาตรวจไฟล์แล้วลองอีกครั้ง' : '';
   const progress = uploading ? uploadPercent : Math.min(99, Math.max(0, job?.progress || 0));
 
-  return <div className="analyst-app">
-    <header className="analyst-header">
-      <Link className="analyst-brand" href="/" aria-label="AI Data Analyst หน้าหลัก"><span className="asw-original-logo" aria-hidden="true" /><strong>AI Data Analyst</strong></Link>
-      <span className="analyst-header-detail">AI DATA ANALYSIS & REPORTING</span>
-      {(dataset || processing || jobError) && <button className="data-button secondary compact" disabled={deleting} onClick={() => void clearDataset()}><Plus size={16} />{deleting ? 'กำลังลบข้อมูล…' : 'เริ่มด้วยไฟล์ใหม่'}</button>}
+  const stage = dataset ? 3 : uploading ? 0 : ['dashboard', 'report'].includes(job?.stage || '') ? 3 : ['profiling', 'patterns', 'ai'].includes(job?.stage || '') ? 2 : processing || jobError ? 1 : 0;
+
+  return <div className="office-app">
+    <header className="office-appbar">
+      <Link className="office-brand" href="/" aria-label="หน้าหลัก"><span className="asw-original-logo" aria-hidden="true" /><strong>ระบบสร้าง Dashboard จากข้อมูล</strong></Link>
+      {(dataset || processing || jobError) && <button className="office-button" disabled={deleting} onClick={() => void clearDataset()}><Plus size={16} />{deleting ? 'กำลังล้างข้อมูล…' : 'อัปโหลดไฟล์ใหม่'}</button>}
     </header>
-    <main className="analyst-main">
-      <div className="data-breadcrumb"><span>AI Data Analyst</span><ChevronRight size={13} /><span>{dataset ? 'ผลการวิเคราะห์' : processing ? 'กำลังวิเคราะห์' : 'อัปโหลดข้อมูล'}</span></div>
-      <div className="analyst-title"><div><span className="analyst-eyebrow">{dataset ? 'YOUR DATA' : processing ? 'PROCESSING' : 'UPLOAD YOUR DATA'}</span>
-        <h1>{dataset ? dataset.filename : processing ? 'Analyzing your data' : 'Upload your data'}</h1>
-        <p>{dataset ? 'สำรวจข้อค้นพบ กราฟ รายงาน และข้อมูลต้นฉบับในที่เดียว' : processing ? 'อ่านข้อมูล ตรวจสอบคอลัมน์ คำนวณสถิติ และสร้างรายงานจากหลักฐานจริง' : 'Drop your CSV or Excel file here and let AI turn it into an understandable business report.'}</p></div>
-        <span className="analyst-phase">{config?.ai?.model || 'GEMINI · DATA ANALYST'}</span>
+    <main className="office-main">
+      <div className="office-pagehead">
+        <h1>{dataset ? dataset.filename : processing ? 'กำลังเตรียม Dashboard' : 'สร้าง Dashboard จากไฟล์ Excel'}</h1>
+        <p>{dataset ? 'ดูแดชบอร์ด รายงาน และข้อมูลต้นฉบับได้จากแท็บด้านล่าง' : processing ? 'ระบบกำลังอ่านไฟล์และคำนวณ ใช้เวลาไม่กี่วินาทีถึงหนึ่งนาที' : 'อัปโหลดไฟล์ แล้วระบบจะสร้างแดชบอร์ดและรายงานให้อัตโนมัติ'}</p>
       </div>
-      <ol className="analyst-flow" aria-label="ขั้นตอนการทำงาน">
-        {['Upload', 'Validation & Profiling', 'AI Analysis', 'Dashboard & Report'].map((label, index) => {
-          const current = dataset ? 3 : uploading ? 0 : ['dashboard', 'report'].includes(job?.stage || '') ? 3 : ['profiling', 'patterns', 'ai'].includes(job?.stage || '') ? 2 : processing || jobError ? 1 : 0;
-          return <li key={label} className={index === current ? 'active' : index < current ? 'done' : ''} aria-current={index === current ? 'step' : undefined}><span>{index < current ? <Check size={14} /> : index + 1}</span>{label}</li>;
-        })}
+      <ol className="office-stepper" aria-label="ขั้นตอนการทำงาน">
+        {['อัปโหลดไฟล์', 'ตรวจสอบข้อมูล', 'คำนวณและสรุปผล', 'ดูผลลัพธ์'].map((label, index) =>
+          <li key={label} className={index === stage ? 'active' : index < stage ? 'done' : ''} aria-current={index === stage ? 'step' : undefined}><span>{index < stage ? <Check size={13} /> : index + 1}</span>{label}</li>)}
       </ol>
 
-      {!locked && (error || jobError) && <div className="data-error" role="alert"><Info size={20} /><div><strong>{jobError ? (job?.dataset ? 'วิเคราะห์ไม่สำเร็จ' : 'อ่านไฟล์ไม่สำเร็จ') : 'ยังดำเนินการไม่ได้'}</strong><p>{error || jobError}</p><div className="data-error-actions">{(file || job?.dataset) && <button className="data-button secondary compact" disabled={processing || deleting || retrying} onClick={() => { if (job?.dataset) void reanalyze(''); else void start(); }}>ลองอีกครั้ง</button>}{jobError && <button className="data-text-button" disabled={deleting} onClick={() => void clearDataset()}>เลือกไฟล์อื่น</button>}</div></div></div>}
+      {!locked && (error || jobError) && <div className="data-error" role="alert"><Info size={20} /><div><strong>{jobError ? (job?.dataset ? 'วิเคราะห์ไม่สำเร็จ' : 'อ่านไฟล์ไม่สำเร็จ') : 'ยังดำเนินการไม่ได้'}</strong><p>{error || jobError}</p><div className="data-error-actions">{(file || job?.dataset) && <button className="office-button" disabled={processing || deleting || retrying} onClick={() => { if (job?.dataset) void reanalyze(''); else void start(); }}>ลองอีกครั้ง</button>}{jobError && <button className="data-text-button" disabled={deleting} onClick={() => void clearDataset()}>เลือกไฟล์อื่น</button>}</div></div></div>}
 
-      {locked ? <AccessGate onUnlocked={unlocked} /> : restoring ? <output className="data-loading"><LoaderCircle size={24} className="data-spin" />กำลังเปิดชุดข้อมูล…</output> : processing ?
-        <section className="data-processing" aria-label="สถานะการประมวลผล">
-          <div className="data-processing-heading">
-            <span className="data-process-icon"><LoaderCircle size={28} className="data-spin" /></span>
-            <div>
-              <span className="analyst-eyebrow">PROCESSING PIPELINE</span>
-              <h2>Analyzing your data</h2>
-              <p>{file?.name || 'ไฟล์ที่อัปโหลด'}{file ? ` · ${sizeLabel(file.size)}` : ''}</p>
-            </div>
+      {locked ? <AccessGate onUnlocked={unlocked} /> : restoring ? <output className="data-loading"><LoaderCircle size={24} className="data-spin" />กำลังเปิดข้อมูล…</output> : processing ?
+        <section className="office-card office-processing" aria-label="สถานะการประมวลผล">
+          <div className="office-processing-head">
+            <FileSpreadsheet size={22} aria-hidden="true" />
+            <div><h2>{file?.name || 'ไฟล์ที่อัปโหลด'}</h2><p>{file ? sizeLabel(file.size) : ''}</p></div>
             <strong>{progress}%</strong>
           </div>
-          <progress className="data-progress" aria-label="ความคืบหน้าการประมวลผล" max={100} value={progress}>{progress}%</progress>
-          <div className="data-current-step-badge">
-            <span>Current step: </span>
-            <strong>{currentStep < processingSteps.length ? `${processingSteps[currentStep].name} (${processingSteps[currentStep].th})` : 'Analysis complete'}</strong>
-          </div>
-          <ul className="data-stage-list">
-            {processingSteps.map((step, index) => {
-              const isDone = currentStep > index;
-              const isActive = currentStep === index;
-              return (
-                <li key={step.key} className={isActive ? 'active' : isDone ? 'done' : 'pending'}>
-                  <span className="data-stage-marker">
-                    {isDone ? <Check size={16} /> : isActive ? <LoaderCircle size={16} className="data-spin" /> : <span className="data-stage-dot" />}
-                  </span>
-                  <div className="data-stage-text">
-                    <strong>{step.name}</strong>
-                    <small>{step.th}</small>
-                  </div>
-                </li>
-              );
-            })}
+          <progress className="office-progress" aria-label="ความคืบหน้า" max={100} value={progress}>{progress}%</progress>
+          <ul className="office-checklist">
+            {processingSteps.map((step, index) => <li key={step.key} className={currentStep === index ? 'active' : currentStep > index ? 'done' : ''}>
+              <span aria-hidden="true">{currentStep > index ? <Check size={14} /> : currentStep === index ? <LoaderCircle size={14} className="data-spin" /> : null}</span>{step.th}
+            </li>)}
           </ul>
-          {pollError && <div className="data-inline-error" role="alert"><p>{pollError}</p><button className="data-button secondary compact" onClick={() => { setPollError(''); setPollRetry(value => value + 1); }}>ตรวจสถานะอีกครั้ง</button></div>}
-          <button className="data-text-button" disabled={deleting} onClick={() => void clearDataset()}>ยกเลิกและลบข้อมูล</button>
-        </section> : dataset && job ? <DatasetResults key={`${job.id}:${job.analysis?.generated_at || 'preview'}`} id={job.id} dataset={dataset} analysis={job.analysis} onAnalyze={reanalyze} retrying={retrying} /> : !jobError && <div className="data-upload-layout">
-          <section className="data-upload-panel" aria-label="อัปโหลดข้อมูล">
-            <div className="data-panel-title">
-              <div>
-                <h2>Upload your data</h2>
-                <p className="data-panel-subtitle">Drop your CSV or Excel file here to start analysis</p>
-              </div>
-              <span className="data-step-badge">01 / UPLOAD</span>
-            </div>
-            {configError ? <div className="data-inline-error" role="alert"><p>{configError}</p><button className="data-button secondary" onClick={() => { setConfigError(''); void loadConfig(); }}>เชื่อมต่ออีกครั้ง</button></div> :
-              <button className={`data-dropzone${dragging ? ' dragging' : ''}`} disabled={!config} onClick={() => input.current?.click()} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); if (config) selectFiles(event.dataTransfer.files); }}>
-                <span className="data-upload-icon"><Upload size={28} strokeWidth={1.7} /></span>
-                <strong>Drop your CSV or Excel file here</strong>
-                <span>หรือคลิกเพื่อเลือกไฟล์จากคอมพิวเตอร์ของคุณ</span>
-                <div className="data-upload-badges">
-                  <span className="data-badge">Supported: CSV, XLSX, XLS</span>
-                  <span className="data-badge">Max size: {config ? sizeLabel(config.max_file_size) : '25 MB'}</span>
-                </div>
+          {pollError && <div className="data-inline-error" role="alert"><p>{pollError}</p><button className="office-button" onClick={() => { setPollError(''); setPollRetry(value => value + 1); }}>ตรวจสถานะอีกครั้ง</button></div>}
+          <button className="data-text-button" disabled={deleting} onClick={() => void clearDataset()}>ยกเลิก</button>
+        </section> : dataset && job ? <DatasetResults key={`${job.id}:${job.analysis?.generated_at || 'preview'}`} id={job.id} dataset={dataset} analysis={job.analysis} boq={job.boq} onAnalyze={reanalyze} retrying={retrying} /> : !jobError && <div className="office-upload">
+          <section className="office-card" aria-label="อัปโหลดไฟล์">
+            <h2>1. เลือกไฟล์ข้อมูล</h2>
+            {configError ? <div className="data-inline-error" role="alert"><p>{configError}</p><button className="office-button" onClick={() => { setConfigError(''); void loadConfig(); }}>เชื่อมต่ออีกครั้ง</button></div> :
+              <button className={`office-dropzone${dragging ? ' dragging' : ''}`} disabled={!config} onClick={() => input.current?.click()} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); if (config) selectFiles(event.dataTransfer.files); }}>
+                <Upload size={30} strokeWidth={1.6} aria-hidden="true" />
+                <strong>ลากไฟล์มาวางที่นี่ หรือคลิกเพื่อเลือกไฟล์</strong>
+                <span>รองรับ Excel (.xlsx, .xls) และ CSV ขนาดไม่เกิน {config ? sizeLabel(config.max_file_size) : '25 MB'}</span>
               </button>}
             <input ref={input} type="file" accept={config?.accepted_extensions.join(',')} aria-label="เลือกไฟล์ข้อมูล" className="data-file-input" tabIndex={-1} onChange={event => { if (event.target.files?.length) selectFiles(event.target.files); event.target.value = ''; }} />
-            {file && (
-              <div className="data-selected-file">
-                <span className="data-file-symbol"><FileSpreadsheet size={24} /></span>
-                <div>
-                  <strong>{file.name}</strong>
-                  <span>{sizeLabel(file.size)} · พร้อมสำหรับการวิเคราะห์ข้อมูล</span>
-                </div>
-                <button className="data-icon-button" aria-label="นำไฟล์ออก" onClick={() => { setFile(null); setError(''); }}><X size={18} /></button>
-              </div>
-            )}
-            <div className="data-upload-action">
-              <p>{file ? 'ระบบจะอ่านข้อมูล ตรวจสอบโครงสร้าง และสังเคราะห์รายงานอัตโนมัติ' : 'รองรับไฟล์ CSV และ XLSX พร้อมวิเคราะห์ทุกชีต'}</p>
-              <button className="data-button primary" disabled={!file || !config || deleting} onClick={() => void start()}>
-                Analyze Data <ArrowRight size={18} />
-              </button>
+            {file && <div className="office-file">
+              <FileSpreadsheet size={22} aria-hidden="true" />
+              <div><strong>{file.name}</strong><span>{sizeLabel(file.size)}</span></div>
+              <button className="data-icon-button" aria-label="นำไฟล์ออก" onClick={() => { setFile(null); setError(''); }}><X size={18} /></button>
+            </div>}
+            <div className="office-actions">
+              <button className="office-button primary large" disabled={!file || !config || deleting} onClick={() => void start()}>2. สร้าง Dashboard <ArrowRight size={17} /></button>
             </div>
           </section>
-          <aside className="data-upload-guide">
-            <span className="analyst-eyebrow">AI-POWERED WORKFLOW</span>
-            <h2>Upload your Excel file and let AI turn it into a business report</h2>
+          <aside className="office-card office-help">
+            <h2>ระบบจะทำอะไรให้</h2>
             <ol>
-              <li>
-                <span>01</span>
-                <div>
-                  <strong>Read & Validate Data</strong>
-                  <p>ตรวจจับโครงสร้างชีต คอลัมน์ ชนิดข้อมูล ค่าว่าง และแถวซ้ำ</p>
-                </div>
-              </li>
-              <li>
-                <span>02</span>
-                <div>
-                  <strong>AI Analysis & Insights</strong>
-                  <p>คำนวณสถิติจริง และให้ AI สังเคราะห์แนวโน้มพร้อมหลักฐานที่ตรวจสอบได้</p>
-                </div>
-              </li>
-              <li>
-                <span>03</span>
-                <div>
-                  <strong>Dashboard & Executive Report</strong>
-                  <p>สร้าง KPI Cards กราฟที่เหมาะสม และรายงานสรุปสำหรับผู้บริหาร พร้อมส่งออก PDF/Excel</p>
-                </div>
-              </li>
+              <li><strong>อ่านทุกชีตในไฟล์</strong><span>ตรวจหัวคอลัมน์ ชนิดข้อมูล ช่องว่าง และแถวซ้ำ</span></li>
+              <li><strong>คำนวณตัวเลขจากทุกแถว</strong><span>ไม่นับแถวยอดรวม/VAT ซ้ำ และใช้ค่าที่ Excel คำนวณไว้</span></li>
+              <li><strong>สร้างแดชบอร์ดและรายงาน</strong><span>กรองข้อมูล คลิกกราฟเพื่อดูรายละเอียด และดาวน์โหลด PDF/Excel/HTML</span></li>
             </ol>
-            {config && <p className="data-limits">หนึ่งตารางต่อชีต หัวคอลัมน์เป็นข้อความครบและไม่ซ้ำ · สูงสุด {config.max_rows.toLocaleString('th-TH')} แถว · {config.max_columns} คอลัมน์ต่อชีต</p>}
+            <p className="office-muted">เคล็ดลับ: แถวแรกของแต่ละชีตควรเป็นหัวคอลัมน์ และหนึ่งชีตควรมีตารางเดียว{config ? ` · สูงสุด ${config.max_rows.toLocaleString('th-TH')} แถว` : ''}</p>
           </aside>
         </div>}
-      <footer className="analyst-footer"><span><ShieldCheck size={16} />{config ? `ไฟล์เก็บชั่วคราว ${config.retention_minutes} นาที · AI รับสถิติและข้อมูลสรุป ไม่รับไฟล์ต้นฉบับ` : 'ประมวลผลไฟล์บนเซิร์ฟเวอร์ และส่งข้อมูลสรุปให้ AI'}</span><span>AI DATA ANALYST</span></footer>
+      <footer className="office-footer"><ShieldCheck size={15} aria-hidden="true" />{config ? `ไฟล์เก็บไว้ชั่วคราว ${config.retention_minutes} นาที แล้วลบอัตโนมัติ · ไม่ส่งข้อมูลรายแถวออกนอกระบบ` : 'ไฟล์ประมวลผลบนเซิร์ฟเวอร์ของระบบ'}</footer>
     </main>
   </div>;
 }

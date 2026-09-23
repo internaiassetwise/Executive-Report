@@ -23,6 +23,8 @@ export interface DatasetJob {
   progress: number;
   dataset?: Dataset;
   analysis?: DatasetAnalysis;
+  /** Present when the workbook is a BOQ benchmark comparison with an engine-rendered report. */
+  boq?: { vendors: string[]; benchmark?: string; headline?: string };
   error?: { code: string; message: string };
 }
 export interface DatasetConfig {

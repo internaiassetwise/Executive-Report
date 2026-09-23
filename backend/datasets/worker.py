@@ -28,7 +28,8 @@ DEFAULT_LIMITS = {
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z")
 ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}.*)?\Z")
-TOTAL_ROW = re.compile(r"(?:grand\s+)?(?:sub\s*-?\s*)?totals?|รวม(?:ทั้งสิ้น|ทั้งหมด)?|ยอดรวม(?:ทั้งสิ้น)?|รวมยอด", re.I)
+# A summary line starts with a total word ("รวม (Total)", "Grand Total ...", "VAT 7%").
+TOTAL_ROW = re.compile(r"(?:grand\s*total|sub\s*-?\s*total|totals?\b|รวม|ยอดรวม|vat\b|ภาษีมูลค่าเพิ่ม)", re.I)
 EXCEL_ERROR = re.compile(r"#(?:DIV/0!|N/A|NAME\?|NULL!|NUM!|REF!|VALUE!|SPILL!|CALC!)")
 
 
@@ -367,7 +368,7 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None)
             kinds = [set() for _ in names]
             rows_count = 0
             formulas_count = 0
-            total_rows = []
+            total_rows, total_labels = [], []
             sheet_id = f"s{len(result['sheets'])}"
             connection.execute(f'CREATE TABLE "data_{sheet_id}" (row_number INTEGER PRIMARY KEY, data TEXT NOT NULL)')
 
@@ -388,8 +389,9 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None)
                 if total_cells > limits["max_cells"]:
                     fail("LIMIT_EXCEEDED", f"จำนวนเซลล์ข้อมูลรวมเกิน {limits['max_cells']:,} เซลล์ กรุณาแบ่งไฟล์")
                 first = next((value for value in values if not blank(value)), None)
-                if isinstance(first, str) and TOTAL_ROW.fullmatch(first.strip()):
+                if isinstance(first, str) and TOTAL_ROW.match(first.strip()):
                     total_rows.append(row_number)
+                    total_labels.append(first.strip()[:60])
                 record = {}
                 for index in range(len(names)):
                     value, kind = normalize(values[index] if index < len(values) else None, f"ชีต {sheet_name} แถว {row_number} คอลัมน์ {index + 1}")
@@ -412,12 +414,12 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None)
             if uncached.get(sheet_name):
                 warnings.append(f"สูตร {uncached[sheet_name]:,} เซลล์ไม่มีค่าที่คำนวณไว้ จึงเก็บเป็นค่าว่าง กรุณาเปิดไฟล์ใน Excel แล้วบันทึกใหม่ก่อนอัปโหลด")
             if total_rows:
-                warnings.append(f"พบแถวที่อาจเป็นยอดรวม {len(total_rows):,} แถว (แถว {', '.join(map(str, total_rows[:5]))}) ผลรวมใน Dashboard จะนับแถวเหล่านี้ด้วย หากไม่ต้องการให้ลบแถวสรุปออกจากไฟล์ก่อนอัปโหลด")
+                warnings.append(f"ไม่นำแถวสรุปยอด {len(total_rows):,} แถวมาคำนวณ ({', '.join(total_labels[:4])}) เพื่อไม่ให้ยอดซ้ำ แถวเหล่านี้ยังแสดงในตารางข้อมูล")
             if visibility != "visible":
                 warnings.append("ชีตนี้ถูกซ่อนในไฟล์ต้นฉบับและรวมอยู่ในข้อมูลที่อ่านแล้ว")
             for column, types in zip(columns, kinds):
                 column["data_type"] = next(iter(types)) if len(types) == 1 else "mixed" if types else "empty"
-            result["sheets"].append({"id": sheet_id, "name": sheet_name, "rows_count": rows_count, "columns": columns, "header_row": header_row, "warnings": warnings})
+            result["sheets"].append({"id": sheet_id, "name": sheet_name, "rows_count": rows_count, "columns": columns, "header_row": header_row, "warnings": warnings, "summary_rows": total_rows[:1000]})
             result["rows_count"] += rows_count
             result["columns_count"] += len(columns)
             progress("reading", 35 + int((source_index + 1) / len(sources) * 35))

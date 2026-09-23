@@ -20,7 +20,7 @@ export interface ChartResult {
   points_total?: number; sampled?: boolean; error?: string;
 }
 export interface DashboardResult {
-  spec: DashboardSpec; filters: DashboardFilter[]; rows_total: number; rows_matched: number;
+  spec: DashboardSpec; filters: DashboardFilter[]; rows_total: number; rows_matched: number; summary_rows_excluded?: number;
   kpis: { id: string; value: number | null }[]; charts: ChartResult[]; options?: Record<string, FilterOption>;
 }
 
@@ -29,17 +29,17 @@ async function failure(response: Response): Promise<never> {
   throw new DatasetError(data?.error?.message || 'คำนวณ Dashboard ไม่สำเร็จ กรุณาลองอีกครั้ง', response.status);
 }
 
-export async function queryDashboard(id: string, filters: DashboardFilter[], options: boolean, signal?: AbortSignal): Promise<DashboardResult> {
+export async function queryDashboard(id: string, filters: DashboardFilter[], options: boolean, signal?: AbortSignal, sheetId?: string): Promise<DashboardResult> {
   const response = await fetch(`/api/datasets/${encodeURIComponent(id)}/dashboard`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filters, options }), signal,
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filters, options, sheet_id: sheetId }), signal,
   });
   if (!response.ok) await failure(response);
   return response.json() as Promise<DashboardResult>;
 }
 
-export async function exportDashboard(id: string, format: 'html' | 'pdf', filters: DashboardFilter[], filename: string, images: { id: string; data: string }[] = []) {
+export async function exportDashboard(id: string, format: 'html' | 'pdf', filters: DashboardFilter[], filename: string, images: { id: string; data: string }[] = [], sheetId?: string) {
   const response = await fetch(`/api/datasets/${encodeURIComponent(id)}/export-dashboard`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ format, filters, ...(format === 'pdf' ? { images } : {}) }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ format, filters, sheet_id: sheetId, ...(format === 'pdf' ? { images } : {}) }),
   });
   if (!response.ok) await failure(response);
   const href = URL.createObjectURL(await response.blob());

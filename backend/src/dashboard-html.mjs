@@ -54,11 +54,11 @@ footer{color:var(--muted);font-size:11px;margin-top:18px}
 </style></head><body>
 <header><h1>${escapeHtml(document.title)}</h1><p>${escapeHtml(document.description || '')}</p></header>
 <main>
-<div class="meta"><span>ไฟล์: ${escapeHtml(document.filename)} · ชีต ${escapeHtml(document.sheet)}</span><span>สร้างเมื่อ ${escapeHtml(generated)}</span><span>แถวที่ใช้ ${escapeHtml(formatFull(document.rows_matched))} จาก ${escapeHtml(formatFull(document.rows_total))}</span><span>${document.source === 'ai' ? 'AI วางแผน Dashboard · ตัวเลขคำนวณโดยระบบ' : 'Dashboard อัตโนมัติ · ตัวเลขคำนวณโดยระบบ'}</span></div>
+<div class="meta"><span>ไฟล์: ${escapeHtml(document.filename)} · ชีต ${escapeHtml(document.sheet)}</span><span>สร้างเมื่อ ${escapeHtml(generated)}</span><span>แถวที่ใช้ ${escapeHtml(formatFull(document.rows_matched))} จาก ${escapeHtml(formatFull(document.rows_total))}</span></div>
 <div>${filters}</div>
 <div class="kpis">${kpis}</div>
 <div class="grid">${panels}</div>
-${insights ? `<section class="insights"><h2>Key Insights</h2>${document.ai_summary ? `<p>${escapeHtml(document.ai_summary)}</p>` : ''}<ul>${insights}</ul></section>` : ''}
+${insights ? `<section class="insights"><h2>ข้อสังเกตสำคัญ</h2>${document.ai_summary ? `<p>${escapeHtml(document.ai_summary)}</p>` : ''}<ul>${insights}</ul></section>` : ''}
 <footer>ตัวเลขทุกค่าคำนวณจากข้อมูลทุกแถวที่ตรงตามตัวกรองในขณะส่งออก ไฟล์นี้เก็บเฉพาะผลสรุป ไม่มีข้อมูลรายแถวต้นฉบับ</footer>
 </main>
 <script type="application/json" id="dashboard-data">${safeJson(document.charts)}</script>

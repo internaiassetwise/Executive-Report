@@ -110,7 +110,7 @@ def scan_profile(connection, sheet, top_limit):
     missing = [0] * len(columns)
     row_digests = set()
     rows_count = 0
-    for (data,) in connection.execute(f'SELECT data FROM "data_{sheet["id"]}" ORDER BY row_number'):
+    for (data,) in connection.execute(f'SELECT data FROM "data_{sheet["id"]}" WHERE row_number NOT IN (SELECT value FROM json_each(?)) ORDER BY row_number', [json.dumps(sheet.get("summary_rows", []))]):
         row = json.loads(data)
         values = [row[column["key"]] for column in columns]
         # Normalize numerically equal values before comparing duplicate rows.
@@ -251,7 +251,7 @@ def sheet_patterns(connection, sheet, profile, counters, numeric, dates):
             trends[(date_index, measure)] = {"unit": unit, "year_step": year_step, "groups": defaultdict(lambda: [0, 0.])}
     stride = max(1, math.ceil(rows_count / 200))
     if pairs or categories or trends:
-        for row_index, (stored,) in enumerate(connection.execute(f'SELECT data FROM "data_{sheet_id}" ORDER BY row_number')):
+        for row_index, (stored,) in enumerate(connection.execute(f'SELECT data FROM "data_{sheet_id}" WHERE row_number NOT IN (SELECT value FROM json_each(?)) ORDER BY row_number', [json.dumps(sheet.get("summary_rows", []))])):
             row = json.loads(stored)
             values = [row[column["key"]] for column in columns]
             for (a, b), accumulator in pairs.items():

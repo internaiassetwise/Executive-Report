@@ -105,6 +105,45 @@ class Detection(unittest.TestCase):
         self.assertIsNone(B.build_many([(sheets_of(b), 'sales.xlsx')]))
 
 
+class PartialAxes(unittest.TestCase):
+    """A workbook carries whichever axes it carries. Two of the three are
+    enough to compare, so nothing may assume all three are present."""
+
+    def test_rate_only_workbook_reports_instead_of_pricing_nothing(self):
+        # Unit rates with no quantity column and no line total: there is no
+        # basis for an amount, so money must be withheld and said, not zero.
+        b = openpyxl.Workbook(); s = b.active; s.title = 'ST_A'
+        s.append(['No', 'รายการ', 'ราคาวัสดุ/หน่วย (ราคากลาง)', 'ราคาวัสดุ/หน่วย',
+                  'ราคาแรง/หน่วย (ราคากลาง)', 'ราคาแรง/หน่วย'])
+        for i, (item, _, _, m, l) in enumerate(ITEMS, 1):
+            s.append([i, item, m, m * 1.5, l, l])
+        rep = B.build_many([(sheets_of(b), 'rates.xlsx')])
+        v = rep['vendors'][0]
+        self.assertEqual(v['axes'], ['labour', 'material'])
+        self.assertNotIn('quantity_over', rep['comparison'])
+        self.assertIsNone(v['total']['savings_pct'])
+        self.assertTrue(any('คำนวณมูลค่า' in line for line in v['insights']))
+        self.assertNotIn('ล้านบาท', rep['executive']['headline'])
+        self.assertIn('ไม่พบคอลัมน์ปริมาณ', ' '.join(v['insights']))
+        html = R.render(rep)
+        self.assertIn('ผู้เสนองาน: rates', html)
+        json.dumps(rep, ensure_ascii=False, allow_nan=False)
+
+    def test_workbook_without_a_labour_axis_omits_that_matrix(self):
+        b = openpyxl.Workbook(); s = b.active; s.title = 'ST_A'
+        s.append(['No', 'รายการ', 'หมวดงาน', 'ปริมาณ RBP', 'ปริมาณ AAA เสนอ', 'ปริมาณ BBB เสนอ',
+                  'ราคาของ RBP', 'ราคาของ AAA เสนอ', 'ราคาของ BBB เสนอ'])
+        for i, (item, cat, q, m, _) in enumerate(ITEMS, 1):
+            s.append([i, item, cat, q, q, q * 1.2, m, m * 1.5, m])
+        rep = B.build_many([(sheets_of(b), 'noLabour.xlsx')])
+        self.assertEqual([v['vendor'] for v in rep['vendors']], ['AAA', 'BBB'])
+        self.assertEqual(sorted(rep['comparison']), ['material_dev', 'quantity_over'])
+        html = R.render(rep)
+        self.assertIn('การวิเคราะห์เปรียบเทียบภาพรวมทุกเจ้า', html)
+        self.assertNotIn('% ค่าแรงสูงกว่า', html)
+        json.dumps(rep, ensure_ascii=False, allow_nan=False)
+
+
 class Dispatch(unittest.TestCase):
     def test_boq_action_returns_report_and_html(self):
         progress = []

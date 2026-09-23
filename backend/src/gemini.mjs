@@ -5,20 +5,27 @@ export function configured(config) {
 
 const numbersIn = text => (String(text).match(/-?\d[\d,]*(?:\.\d+)?/g) || []).map(t => t.replace(/,/g, ''));
 
+// 'EV-001' names a source; it does not assert a quantity. The system prompt
+// asks for these citations by name, so reading their digits as a numerical
+// claim rejected exactly the output the prompt requested. Removing the whole
+// token cannot smuggle a figure in: nothing is left behind to read.
+const withoutCitations = text => String(text).replace(/\bEV-\d+\b/gi, ' ');
+
 // A comparison report is argued in figures, so the interpretation may cite
 // them — but only figures the supplied evidence actually contains. Every
 // number in the generated text must match an evidence number once both are
 // read at the precision the text used, which allows a rounded quotation of a
 // supplied value and rejects an invented one.
 export function grounded(text, evidence) {
+  const claims = withoutCitations(text);
   // Numerals outside 0-9 cannot be checked against the evidence, so they stay
   // barred as before rather than passing unverified.
-  if (/\p{N}/u.test(String(text).replace(/[0-9]/g, ''))) return false;
+  if (/\p{N}/u.test(claims.replace(/[0-9]/g, ''))) return false;
   // Ground against what the evidence states, not its identifiers: 'EV-001'
-  // must never license the digit it contains.
-  const corpus = evidence.map(e => `${e.finding} ${e.method}`).join(' ');
+  // must never license the digit it contains, on either side of the check.
+  const corpus = withoutCitations(evidence.map(e => `${e.finding} ${e.method}`).join(' '));
   const supplied = numbersIn(corpus).map(Number).filter(Number.isFinite);
-  return numbersIn(text).every(token => {
+  return numbersIn(claims).every(token => {
     const value = Number(token);
     if (!Number.isFinite(value)) return false;
     const dot = token.indexOf('.');

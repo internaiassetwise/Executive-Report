@@ -1,54 +1,103 @@
 # ASW Data Insight
 
-โปรเจกต์แบ่งเป็น `frontend` และ `backend` และใช้ npm workspaces จากโฟลเดอร์หลัก
+วิเคราะห์ CSV/XLSX ผ่าน flow เดียว: **Upload → Validate → Profile → AI → Dashboard / Report → Export**
 
-```text
-AI report/
-├── frontend/
-│   ├── app/                 หน้าเว็บและตัวส่งต่อคำขอไป backend
-│   ├── components/          UI, กราฟ, ตัวอย่างรายงาน
-│   ├── lib/                 โมเดลข้อมูลและตัวเชื่อมต่อ
-│   ├── public/              โลโก้, ข้อมูลตัวอย่าง, Python web worker
-│   ├── tests/               ทดสอบ Pyodide
-│   ├── scripts/             สร้างข้อมูลตัวอย่าง
-│   └── .openai/             ข้อมูลอ้างอิง Sites เฉพาะเครื่อง (ไม่เข้า Git)
-├── backend/
-│   ├── src/                 HTTP API และการเชื่อมต่อ Gemini
-│   ├── analysis/            Python analysis engine ฉบับหลัก
-│   ├── tests/               ทดสอบ API และการคำนวณ
-│   ├── .env                 Gemini key และ model (ไม่เข้า Git)
-│   └── .env.example         ตัวอย่างการตั้งค่า
-├── scripts/dev.mjs          เปิด/ปิดทั้งสองเซิร์ฟเวอร์ร่วมกัน
-├── skills/                  แนวทางพัฒนารายส่วน
-├── package.json             คำสั่งรวม
-└── package-lock.json        lockfile ของทั้งโปรเจกต์
-```
+ใช้ชื่อ โลโก้ และธีมน้ำเงิน AssetWise เดิม ไฟล์ทั่วไปและ BOQ ไม่แยกโหมด การอ่านไฟล์/คำนวณย้ายมา Python ฝั่ง backend; frontend แสดงข้อมูล JSON และไม่โหลด Pyodide เพื่อทำงานใน flow ใหม่
 
-## เปิดใช้งานบน localhost
+## เปิดใช้งาน
 
-ใช้ Node.js 22.13 ขึ้นไป จากโฟลเดอร์หลักของโปรเจกต์:
+ต้องมี Node.js22.13+ และ Python3.10+ พร้อม SQLite
 
 ```powershell
 npm install
+python -m pip install -r backend/requirements.txt
 npm run dev
 ```
 
-หลัง clone สามารถเปิด localhost ได้ทันทีโดยไม่ต้องมีไฟล์ `.openai/hosting.json` หากต้องการ Gemini ให้คัดลอก `backend/.env.example` เป็น `backend/.env` แล้วตั้งค่าของคุณเอง
+เปิด http://localhost:3000 · backend http://127.0.0.1:8000 · หยุดด้วย Ctrl+C
 
-- หน้าเว็บ: http://localhost:3000
-- Backend: http://127.0.0.1:8000
-- ตรวจ backend: http://127.0.0.1:8000/api/health
-- กด Ctrl+C ที่คำสั่งรวมเพื่อหยุดทั้งสองฝั่ง
+ตั้งค่าใน `backend/.env` (มีตัวอย่าง `backend/.env.example`):
 
-หากต้องการเปิดแยก terminal: `npm run dev:backend` และ `npm run dev:frontend`
+```dotenv
+GEMINI_API_KEY=your-api-key
+GEMINI_MODEL=gemini-3-flash-preview
+```
 
-## Gemini key
+โมเดลเริ่มต้นคือ **gemini-3-flash-preview** ใช้ thinkingระดับminimal และคำขอเดียวจากสถิติ/หลักฐานที่คำนวณแล้ว มี timeout และตรวจ JSON schema/เลขอ้างอิง/ตัวเลขที่ AI กล่าวอ้าง Keysอยู่ฝั่ง backend เท่านั้น หากยังไม่ตั้ง key หรือ provider มีปัญหา ผลคำนวณ Dashboard และรายงานยังเปิดได้ พร้อมแจ้งสถานะ AI และปุ่มลองใหม่
 
-ใส่ `GEMINI_API_KEY` และ `GEMINI_MODEL` ใน `backend/.env` แล้วเริ่ม backend ใหม่ ค่าจาก `.env` เดิมถูกย้ายมาโดยไม่เปลี่ยนแปลง ไม่มี Gemini key ใน frontend และไม่มีการส่ง key ให้เบราว์เซอร์
+แก้ค่าขีดจำกัดและ `PYTHON_BIN` ได้ใน backend/.env หลังเปลี่ยนค่าให้ restart เซิร์ฟเวอร์ ถ้าเปลี่ยน origin/port ให้แก้ `FRONTEND_ORIGINS` และ frontend `BACKEND_URL` ตามตัวอย่าง
 
-`frontend/.env.example` มีเพียง `BACKEND_URL` ซึ่งเริ่มต้นเป็น `http://127.0.0.1:8000` ไม่จำเป็นต้องสร้าง frontend `.env` หากใช้ค่าเดิม
+## สิ่งที่ใช้งานได้
 
-## การประมวลผล
+- เลือกไฟล์ก่อนเริ่ม แสดงชื่อ/ขนาด ตรวจนามสกุล MIME เนื้อหา หัวคอลัมน์ ไฟล์เสีย และขีดจำกัด
+- อ่านหลายชีต รวมชีตซ่อน แจ้งชีต/แถวว่างที่ข้าม และรักษาเลขแถวต้นฉบับ
+- Background jobs พร้อมสถานะการอ่าน คำนวณสถิติ AI และสร้างรายงานจาก backend จริง
+- Profiling: ชนิดข้อมูล ค่าว่าง ค่าที่ไม่ซ้ำ แถวซ้ำ min/max/mean/median/std/sum ช่วงวันที่ หมวดหมู่ outliersแบบIQR และ correlations
+- KPI และกราฟเลือกจากโครงสร้างจริง: trend, category, distribution, part-to-whole, scatter ไม่สมมติชื่อ sales/revenue
+- Dashboard, Report, Data และ Analysis พร้อมที่มา/หลักฐาน/วิธีคำนวณ
+- Previewแบบpagination ค้นหาทั้งข้อมูลหรือเฉพาะคอลัมน์ และเรียงค่าตามชนิดข้อมูล
+- รายงาน10หัวข้อ พร้อม executive summary, findings, trends, segments, risks, quality, recommendationsและmethodology
+- ดาวน์โหลด **PDF แบบจัดหน้ารายงานจริง**, **Excel summary**, **CSV ของชีตที่เลือก** พร้อมป้องกัน formula injection
+- วิเคราะห์ใหม่พร้อมเป้าหมายที่ต้องการเน้น ยกเลิก/ลบ dataset และเก็บ sessionชั่วคราวในแท็บเดิม
+
+## รูปแบบข้อมูลและขีดจำกัด
+
+CSVรองรับUTF-8/UTF-16 BOM และตัวคั่นcomma/semicolon/tab/pipe; ExcelรองรับXLSX ครั้งละหนึ่งไฟล์ หลาย worksheet
+
+ใช้หนึ่งตารางต่อชีต แถวแรกที่มีข้อมูลต้องเป็นหัวคอลัมน์ข้อความครบและไม่ซ้ำ ไฟล์ BOQ ที่มีหัวรายงาน/merged headersหลายชั้นต้องจัดเป็นตารางก่อน ระบบไม่สลับไป engineเฉพาะBOQและไม่ลบแถวรวมเอง สูตรExcelแสดงเป็นข้อความและแจ้งเตือน ไม่คำนวณสูตร
+
+ค่าเริ่มต้น25MiBต่อไฟล์,100,000แถวรวม,200คอลัมน์ต่อชีต,2ล้านเซลล์,50ชีต,100MBหลังคลายXLSX หากเกินจะแจ้งข้อผิดพลาด ไม่มีการตัดแถวเงียบ ๆ ตัวเลขในหน้าจออ่านจาก backend config
+
+สถิติคำนวณจากข้อมูลที่เก็บทั้งหมด กราฟ/ข้อค้นพบและคอลัมน์ความสัมพันธ์มีจำนวนจำกัดเพื่อความเร็ว พร้อมอธิบายในวิธีคำนวณ จุดscatterและข้อความpreviewอาจย่อเพื่อแสดงผล แต่การค้นหา/เรียงใช้ข้อมูลเต็ม AIรับเฉพาะprofile/aggregations/evidenceไม่เกินขนาดที่กำหนด
+
+## โครงสร้าง
+
+```text
+frontend/app/                 หน้าเว็บและ same-origin API adapters
+frontend/components/
+  data-workspace.tsx          upload / background status / retry
+  dataset-results.tsx         Dashboard / Report / Data / Analysis
+  dataset-chart.tsx           กราฟจากข้อมูลคำนวณ
+  data-preview.tsx            ตารางแบบแบ่งหน้า
+frontend/lib/                typed contracts, API client, binary proxy
+backend/src/
+  server.mjs                  HTTP limits และ config
+  datasets.mjs                dataset/job lifecycle และ exports
+  dataset-ai.mjs              Gemini structured reasoning
+backend/datasets/
+  worker.py                   อ่านไฟล์ SQLite และ preview
+  analyzer.py                 สถิติ/หลักฐาน/กราฟ/รายงาน
+  exports.py                  PDF/XLSX/CSV
+backend/analysis/             engineเดิมเก็บไว้ ไม่ใช่ flow หน้าเว็บใหม่
+```
+
+APIหลักและข้อจำกัด deployment: [docs/DATA_PIPELINE.md](docs/DATA_PIPELINE.md)
+
+## PDF ภาษาไทย
+
+ติดตั้ง dependencyตาม requirements รวมreportlab/uharfbuzz เพื่อจัดสระและวรรณยุกต์ ฟอนต์WindowsตรวจLeelawadeeอัตโนมัติ Linuxติดตั้งNotoSansThai (`fonts-noto-core`) หรือตั้ง `PDF_FONT_PATH` และ `PDF_FONT_BOLD_PATH` ให้ชี้ไปฟอนต์TrueTypeภาษาไทยที่เซิร์ฟเวอร์อ่านได้ ฟอนต์ฝังในPDF
+
+## ตรวจ build
+
+```powershell
+npm run typecheck
+npm run build:backend
+npm run build
+```
+
+Testsสำหรับพัฒนา: `npm test`, `npm run test:datasets`, `npm run test:analyzer`, `npm run test:exports` ส่วนengineเดิมยังตรวจด้วย `test:analysis` / `test:boq` ได้ Full lintยังมีข้อผิดพลาดเดิมในlegacy UI primitives; ไฟล์หน้าใหม่ตรวจแยกได้
+
+## การเก็บข้อมูลและ deployment
+
+เก็บไฟล์/SQLiteในพื้นที่ชั่วคราว ไม่มีการ logเนื้อหา dataset ไฟล์ต้นฉบับลบหลังparse ชุดข้อมูลลบเมื่อสั่งเริ่มไฟล์ใหม่/ยกเลิก หมดอายุ(default60นาที) หรือgraceful shutdown
+
+รันbackendหนึ่งprocess; job IDสุ่มเป็นcapabilityและไม่มีendpointรวมไฟล์ทั้งหมด ระบบนี้ยังไม่มีบัญชีผู้ใช้/tenant ownership จึงควรอยู่หลังระบบควบคุมการเข้าถึงขององค์กร ก่อนเปิดpublicหลายผู้ใช้ต้องเพิ่มauthentication/quotasและdurablejob storage การcrashอาจเหลือไฟล์temp ใช้ephemeral volumeหรือนโยบายcleanupของhost
+
+Hostต้องมีทั้งNodeและPython/openpyxl/reportlab/uharfbuzzพร้อมฟอนต์ไทย ยังไม่มีการdeployหรือเปลี่ยนRailway/Sitesในรอบนี้
+
+## Flow รายงาน AI / BOQ (หน้าเดิม)
+
+> หมายเหตุ: หน้าแรกปัจจุบันใช้ DataWorkspace ตามหัวข้อด้านบน ส่วนนี้อธิบาย flow รายงาน AI วางแผน + BOQ ซึ่งโค้ดยังอยู่ใน repo (`/api/plan`, `/api/report`, `frontend/lib/*-writer.ts`) แต่ไม่ได้ติดตั้งเป็นหน้าแรก คำว่า "หน้าเว็บปัจจุบัน" ด้านล่างหมายถึงหน้าเดิมนั้น
 
 ### Flow ปัจจุบัน: ทุกไฟล์ใช้เส้นทางเดียว
 
@@ -80,33 +129,10 @@ npm run dev
 
 อัปโหลดครั้งเดียวแล้วอ่านทุกชีตอัตโนมัติ รวมชีตที่ซ่อนอยู่ แสดงภาพรวมทุกตารางโดยไม่ต้องเลือกชีต คำนวณแยกแต่ละตารางและรวมข้อค้นพบในรายงานเดียวพร้อมที่มา ชีตว่างหรือไม่มีตารางเข้าเกณฑ์จะแสดงเหตุผล ผลลัพธ์แบ่งหน้าครั้งละ 12 รายการ ส่วนรายงานและ Report JSON เก็บข้อค้นพบครบทุกตาราง
 
-การจัดโฟลเดอร์ครั้งนี้คงพฤติกรรมเดิม: ไฟล์ Excel ยังคำนวณด้วย Python/Pyodide ในเบราว์เซอร์ ไม่ส่ง workbook ไป backend ตัว backend ให้บริการ source code ของ engine ฉบับหลักและ API สำหรับคำตีความจาก Gemini เท่านั้น
-
-Frontend ส่ง `/api/interpret` และ `/analysis_engine.py` ผ่าน Node proxy ของ Vite ระหว่างพัฒนาบน localhost ส่วน build มี app route สำหรับเชื่อมต่อ backend ที่เข้าถึงได้ผ่าน `BACKEND_URL` ไม่ทำสำเนา Python engine ลงใน `public` การใช้ build บน Worker อาจไม่รองรับ backend แบบ loopback จึงต้องใช้ URL ของ backend ที่เผยแพร่แล้ว
-
-## ตรวจสอบ
-
-Git เก็บเฉพาะโค้ด เอกสาร และข้อมูลตัวอย่างที่สร้างขึ้นด้วย `frontend/scripts/create_sample.py` ไฟล์ `.env`, ข้อมูลผูก deployment, workbook ที่อัปโหลด, รายงานส่งออก และไฟล์ credentials ถูกกันด้วย `.gitignore` อย่าใช้ `git add -f` กับไฟล์เหล่านี้
-
-```powershell
-npm run typecheck
-npm test
-python -m pip install -r backend/requirements.txt
-npm run test:analysis
-npm run test:runtime
-npm run build
-```
-
-การทดสอบ runtime ต้องใช้อินเทอร์เน็ตเพื่อโหลด Pyodide packages ส่วน API tests ใช้ provider จำลองและไม่เรียก Gemini ด้วย key จริง
-
-## การเผยแพร่
-
-โปรเจกต์เตรียมไว้สำหรับ Railway แบบ 2 services ใน private network แล้ว โดยใช้ Infrastructure as Code ที่ `.railway/railway.ts` หน้าเว็บรันด้วย `vinext start` ซึ่งอ่าน `PORT` อัตโนมัติ ส่วน backend อ่าน `PORT` และ bind ที่ `0.0.0.0`
-
 ขั้นตอนตรวจแผน, apply, สร้าง public domain และตั้งค่า Gemini อยู่ใน [คู่มือ Railway](.railway/README.md) การ deploy จาก GitHub จะใช้เฉพาะโค้ดที่ commit และ push แล้ว
 
 
-## Flow อัตโนมัติสำหรับไฟล์ซับซ้อน
+### Flow อัตโนมัติสำหรับไฟล์ซับซ้อน
 
 ก่อนเขียน ระบบตัดหัวข้อที่อ้างหลักฐานชุดเดียวกันซ้ำ หากเหลือเกิน 12 หัวข้อจะรวมหลักฐานที่เกี่ยวข้องไว้ใต้ชื่อหัวข้อเดิมที่ AI เสนอจากข้อมูล โดยไม่เปลี่ยนเป็นชื่อหมวดสำเร็จรูปและไม่รวมตัวเลขข้ามตาราง หลักฐานของแต่ละหัวข้อถูกสรุปเป็นชุดขนาดจำกัดก่อนเขียน แล้วใช้บทวิเคราะห์เหล่านี้ต่อในบทสรุปผู้บริหารและข้อเสนอแนะ หน้ารายงานแสดงตัวอย่างผลคำนวณไม่เกิน 3 รายการต่อหัวข้อ ข้อมูลเต็มและรหัสหลักฐานทุกชิ้นยังอยู่ใน Report JSON รูปแบบ A4 และการจัดวางเดิมยังคงอยู่ จำนวนคำขอ AI อาจมากกว่าจำนวนหัวข้อเพราะมีการรวมหลักฐานเมื่อข้อมูลมาก
 

@@ -316,14 +316,17 @@ def plan(t):
                 add('correlation',f'{cols[i]["name"]} ↔ {cols[j]["name"]}','Pearson correlation ของแถวที่มีค่าครบ ไม่สรุปเหตุและผล',[i,j])
     return plans
 
-def inspect(raw, filename, sheets=None, safe=False):
+def inspect(raw, filename, sheets=None, safe=False, progress=None):
     TABLES.clear()
     WORKBOOK.clear()
     if not raw:raise ValueError('ไฟล์ว่าง กรุณาเลือกไฟล์ที่มีข้อมูล')
     if len(raw)>15*1024*1024:raise ValueError('ไฟล์ใหญ่กว่า 15 MB กรุณาแบ่งไฟล์')
     sheets=sheets if sheets is not None else load_sheets(raw,filename)
     tables=[]; notes=[]
-    for sheet in sheets:
+    # Table detection on a large workbook can run for minutes. It reports per
+    # sheet so the client's inactivity timeout measures a stall, not the work.
+    for index,sheet in enumerate(sheets):
+        if progress:progress(index+1,len(sheets),sheet['name'])
         try:
             detected=detect(sheet)
             if safe:
@@ -470,7 +473,12 @@ def analyze_workbook(selected_types=None, objective='', progress=None, selected_
                 evidence.append(ev)
                 results.append({**part['analyses'][0],'evidence_id':eid,'source':ev['source']})
                 completed+=1
-            except (ValueError,OverflowError,ZeroDivisionError,statistics.StatisticsError) as error:
+            # The contract is that one analysis failing never costs the rest of
+            # the workbook, so every fault a single calculation can raise is
+            # disclosed and the loop continues: bad arithmetic (ArithmeticError
+            # covers zero division and overflow) as well as a malformed column
+            # profile or plan (KeyError, IndexError, TypeError).
+            except (ValueError,TypeError,KeyError,IndexError,ArithmeticError,statistics.StatisticsError) as error:
                 errors.append({'analysis_id':p['id'],'title':p['title'],'source':table_source(t),'message':str(error)})
                 failed+=1
         table_reports.append({'id':t['id'],'name':t['name'],'sheet':t['sheet'],'range':t['range'],'rows_count':t['rows_count'],'columns_count':t['columns_count'],'analyses_count':completed,'errors_count':failed,'status':'partial' if failed else 'complete'})
@@ -529,7 +537,7 @@ def dispatch(action, payload, progress=None):
     if action=='boq_render':
         import boq_report
         return boq_report.render(payload['report'])
-    if action=='inspect':return inspect(bytes(payload['bytes']),payload['filename'])
+    if action=='inspect':return inspect(bytes(payload['bytes']),payload['filename'],None,False,progress)
     if action=='analyze':return analyze(payload['table_id'],payload['selected'],payload.get('objective',''))
     if action=='analyze_workbook':return analyze_workbook(payload.get('selected_types'),payload.get('objective',''),progress,payload.get('selected_plans'))
     if action=='boq':return boq(payload['files'],payload.get('tolerance'),progress)

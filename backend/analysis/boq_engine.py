@@ -303,12 +303,18 @@ def read_rows(found):
                     v = num(r[idx]) if idx < len(r) else None
                     rec[f'total_{role}'] = v
                     has_value = has_value or v is not None
-                rec['priced'] = any(rec.get(f'{a}_proposal') for a in ('material', 'labour')) \
-                    or bool(rec.get('quantity_proposal'))
+                # A quoted zero is a quote: work included in another line is
+                # priced at 0, and reading that as 'no value' would let the row
+                # be discarded as a heading below. Absence is None, never 0.
+                rec['priced'] = any(rec.get(f'{a}_proposal') is not None for a in ('material', 'labour')) \
+                    or rec.get('quantity_proposal') is not None
                 # A proposal or normalized total on an unpriced row marks a
                 # heading (a heading may carry a subtotal in one column and
                 # nothing in another). A benchmark total alone does not: that
                 # is a benchmark line the vendor left unquoted, and it stays.
+                # Truthiness is deliberate here, unlike above: a subtotal of
+                # exactly 0 is far likelier to be an unquoted line than a
+                # heading, and dropping a real line item is the worse error.
                 own_total = any(rec.get(f'total_{k}') for k in ('proposal', 'normalized'))
                 rec['parent'] = uncategorized or (own_total and not rec['priced'])
                 if has_value:
@@ -606,7 +612,13 @@ def finish(p, tolerance, source):
 
 def choose_tolerance(prepared, declared):
     """One tolerance for the whole report so vendors are judged alike.
-    Declared wins; else the strictest the files themselves used; else default."""
+
+    Declared wins. Otherwise each file's inferred value is an upper bound on
+    the threshold that file was normalized at, so the largest bound is the only
+    one no file contradicts: it never normalizes a cell that some file's own
+    author accepted, and so never reports a saving that file did not claim.
+    A smaller bound would over-claim. Falls back to the default.
+    """
     if declared is not None:
         return declared, 'declared'
     inferred = [p['file_tolerance'] for p in prepared if p['file_tolerance'] is not None]
@@ -619,8 +631,22 @@ def pct(v):
     return f"{v:+.1f}%" if v is not None else '—'
 
 
+def rate(v):
+    """Unsigned percentage for narrative text. A ratio with no base to divide
+    by prints '—', never a fabricated zero."""
+    return f"{v:.1f}%" if v is not None else '—'
+
+
 def money(v):
     return f"{v:,.0f}" if v is not None else '—'
+
+
+def million(v):
+    """ล้านบาท, with enough precision that a real total never reads as 0."""
+    if v is None:
+        return '—'
+    m = v / 1e6
+    return f"{m:,.0f}" if abs(m) >= 10 else f"{m:,.2f}"
 
 
 def top(groups, key, min_items=0):
@@ -638,7 +664,7 @@ def vendor_insights(v):
         q = top(G, 'quantity_over')
         if q and q['quantity_over']:
             out.append(f"{v['vendor']} มีปริมาณเกิน {ref} มากที่สุดในหมวด {q['group']} ({q['quantity_over']:,} รายการ "
-                       f"คิดเป็น {q['quantity_over_pct']:.1f}% ของรายการในหมวด) รวมทุกหมวด {T['quantity_over']:,} รายการ")
+                       f"คิดเป็น {rate(q['quantity_over_pct'])} ของรายการในหมวด) รวมทุกหมวด {T['quantity_over']:,} รายการ")
         else:
             out.append(f"{v['vendor']} แทบไม่มีปริมาณเกิน {ref} เกินเกณฑ์ (พบ {T['quantity_over']:,} รายการ)")
     lab, mat = top(G, 'labour_dev_pct', MIN_INSIGHT_ITEMS), top(G, 'material_dev_pct', MIN_INSIGHT_ITEMS)
@@ -648,8 +674,17 @@ def vendor_insights(v):
                    f"ภาพรวมค่าแรง {pct(T.get('labour_dev_pct'))} ค่าของ {pct(T.get('material_dev_pct'))}")
     s = top(G, 'savings')
     if s and s['savings'] > 0:
-        out.append(f"หมวดที่ปรับได้มากที่สุดคือ {s['group']} ประหยัด {money(s['savings'])} บาท ({s['savings_pct']:.1f}% ของหมวด) "
-                   f"รวมทั้งหมด {money(T['savings'])} บาท หรือ {T['savings_pct']:.1f}% ของราคาที่เสนอ")
+        out.append(f"หมวดที่ปรับได้มากที่สุดคือ {s['group']} ประหยัด {money(s['savings'])} บาท ({rate(s['savings_pct'])} ของหมวด) "
+                   f"รวมทั้งหมด {money(T['savings'])} บาท หรือ {rate(T['savings_pct'])} ของราคาที่เสนอ")
+    if not T['original']:
+        # With neither a quantity column nor a line total, line_money has
+        # nothing to price a row with and every amount is zero. Say so rather
+        # than printing a zero-baht financial table as if it were a finding.
+        out.append(f"ไฟล์นี้คำนวณมูลค่ารายบรรทัดไม่ได้ (ไม่พบคอลัมน์ปริมาณหรือยอดรวมรายบรรทัดที่อ่านค่าได้ หรือทุกรายการมีมูลค่าศูนย์) "
+                   f"ตารางผลกระทบทางการเงินจึงไม่มีจำนวนเงิน · จำนวนรายการที่เกิน {ref} ยังเปรียบเทียบได้ตามปกติ")
+    if 'quantity' not in v['axes']:
+        out.append(f"ไม่พบคอลัมน์ปริมาณในไฟล์นี้ % ต่างราคาต่อหน่วยจึงถ่วงน้ำหนักตามปริมาณ {ref} ไม่ได้ และแสดงเป็น '—' "
+                   f"ให้ใช้จำนวนรายการที่เกินเกณฑ์แทน หรือเพิ่มคอลัมน์ปริมาณในไฟล์ต้นทาง")
     if T['not_quoted']:
         out.append(f"มี {T['not_quoted']:,} รายการใน {ref} ที่ {v['vendor']} ไม่ได้เสนอราคา ควรขอยืนยันขอบเขตก่อนเปรียบเทียบยอดรวม")
     if T.get('mismatch'):
@@ -708,9 +743,12 @@ def strategy(vendors, sigs):
     if qty_heavy:
         out.append(f"เจ้าที่ 'เน้นปริมาณ': {', '.join(x['vendor'] for x in qty_heavy)} — มีรายการปริมาณเกิน "
                    f"{qty_heavy[0]['benchmark']} มาก ควรตรวจสอบปริมาณร่วม (Joint Re-measure) ก่อนตกลงราคา")
-    closest = min(vendors, key=lambda x: x['total']['savings_pct'] or 0)
-    if len(vendors) > 1:
-        out.append(f"{closest['vendor']} ใกล้เคียง {closest['benchmark']} ที่สุด (ปรับได้เพียง {closest['total']['savings_pct']:.1f}%) "
+    # 'Closest to the benchmark' is a claim about money, so only vendors whose
+    # value could actually be computed are eligible to carry it.
+    priced = [x for x in vendors if x['total']['savings_pct'] is not None]
+    if len(vendors) > 1 and priced:
+        closest = min(priced, key=lambda x: x['total']['savings_pct'])
+        out.append(f"{closest['vendor']} ใกล้เคียง {closest['benchmark']} ที่สุด (ปรับได้เพียง {rate(closest['total']['savings_pct'])}) "
                    f"จึงเหมาะเป็นราคาอ้างอิงเปรียบเทียบ (Benchmark) ในการเจรจากับเจ้าอื่น")
     return out
 
@@ -719,26 +757,36 @@ def executive(vendors, sigs, tolerance):
     rows = [{'vendor': v['vendor'], 'original': v['total']['original'], 'normalized': v['total']['normalized'],
              'savings': v['total']['savings'], 'savings_pct': v['total']['savings_pct']} for v in vendors]
     items = sum(v['total']['benchmark_items'] for v in vendors)
-    lo = min(vendors, key=lambda v: v['total']['savings_pct'] or 0)
-    hi = max(vendors, key=lambda v: v['total']['savings_pct'] or 0)
     names = ', '.join(v['vendor'] for v in vendors)
+    # Only vendors whose value could be computed can be ranked by value. When a
+    # workbook prices nothing, the range is withheld instead of read as 0%.
+    priced = [v for v in vendors if v['total']['savings_pct'] is not None]
+    lo = min(priced, key=lambda v: v['total']['savings_pct']) if priced else None
     if len(vendors) > 1:
-        summary = (f"รายงานฉบับนี้ตรวจสอบรายการ BOQ รวม {items:,} รายการ จากผู้เสนอราคา {len(vendors)} ราย ({names}) "
-                   f"พบว่าราคาที่เสนอสูงกว่าราคากลางอย่างมีนัยสำคัญในระดับ {lo['total']['savings_pct']:.1f}–{hi['total']['savings_pct']:.1f}% "
-                   f"โดย {lo['vendor']} ใกล้เคียงราคากลางที่สุด และ {hi['vendor']} ห่างจากราคากลางมากที่สุด")
+        hi = max(priced, key=lambda v: v['total']['savings_pct']) if priced else None
+        span = (f"พบว่าราคาที่เสนอสูงกว่าราคากลางอย่างมีนัยสำคัญในระดับ {rate(lo['total']['savings_pct'])}–{rate(hi['total']['savings_pct'])} "
+                f"โดย {lo['vendor']} ใกล้เคียงราคากลางที่สุด และ {hi['vendor']} ห่างจากราคากลางมากที่สุด"
+                if lo is not None and hi is not None else
+                'แต่คำนวณมูลค่ารายบรรทัดจากไฟล์ที่อัปโหลดไม่ได้ จึงยังเปรียบเทียบกันเป็นจำนวนเงินไม่ได้')
+        summary = (f"รายงานฉบับนี้ตรวจสอบรายการ BOQ รวม {items:,} รายการ จากผู้เสนอราคา {len(vendors)} ราย ({names}) " + span)
     else:
         v = vendors[0]
         summary = (f"รายงานฉบับนี้ตรวจสอบรายการ BOQ รวม {items:,} รายการ ของ {v['vendor']} เทียบ {v['benchmark']} "
-                   f"พบว่าปรับลดได้ {v['total']['savings_pct']:.1f}% ของราคาที่เสนอ")
+                   + (f"พบว่าปรับลดได้ {rate(v['total']['savings_pct'])} ของราคาที่เสนอ" if lo is not None else
+                      'แต่คำนวณมูลค่ารายบรรทัดจากไฟล์นี้ไม่ได้ จึงยังประเมินผลประหยัดเป็นจำนวนเงินไม่ได้'))
     by = {s['vendor']: s for s in sigs}
     bullets = [f"{v['vendor']}: {by[v['vendor']]['pattern']} — หมวดที่กระทบมากที่สุด {by[v['vendor']]['top_groups']} "
-               f"ปรับได้ {money(v['total']['savings'])} บาท ({v['total']['savings_pct']:.1f}%)" for v in vendors]
+               f"ปรับได้ {money(v['total']['savings'])} บาท ({rate(v['total']['savings_pct'])})" for v in vendors]
     bullets.append(f"ข้อเสนอแนะเชิงกลยุทธ์: ใช้ผลการ Normalize ที่เกณฑ์ {tolerance * 100:.0f}% นี้เป็นฐานการเจรจา "
                    f"โดยเน้นจุดที่มีมูลค่าสูงสุดของแต่ละเจ้าก่อน")
-    avg_s = sum(r['savings'] for r in rows) / len(rows)
-    avg_p = sum(r['savings_pct'] or 0 for r in rows) / len(rows)
-    headline = (f"ผลรวมการประหยัดที่เป็นไปได้ (เฉลี่ย {len(rows)} เจ้า {names} เทียบราคาที่เสนอ): "
-                f"ประมาณ {avg_s / 1e6:,.0f} ล้านบาท หรือ {avg_p:.1f}% ของราคาเสนอเฉลี่ย")
+    # Averaged over the vendors that have a value, so one unpriced workbook
+    # cannot drag the reported average toward zero.
+    avg_s = sum(v['total']['savings'] for v in priced) / len(priced) if priced else None
+    pcts = [v['total']['savings_pct'] for v in priced]
+    avg_p = sum(pcts) / len(pcts) if pcts else None
+    headline = (f"ผลรวมการประหยัดที่เป็นไปได้ (เฉลี่ย {len(priced)} เจ้า {', '.join(v['vendor'] for v in priced) or '—'} เทียบราคาที่เสนอ): "
+                f"ประมาณ {million(avg_s)} ล้านบาท หรือ {rate(avg_p)} ของราคาเสนอเฉลี่ย") if priced else (
+                'ยังประเมินผลประหยัดเป็นจำนวนเงินไม่ได้: คำนวณมูลค่ารายบรรทัดจากไฟล์ที่อัปโหลดไม่ได้')
     return {'rows': rows, 'summary': summary, 'bullets': bullets, 'headline': headline}
 
 
@@ -766,10 +814,17 @@ def build_many(workbooks, tolerance=None):
     tol, source = choose_tolerance(prepared, tolerance)
     vendors = [finish(p, tol, source) for p in prepared]
     groups = sorted({g['group'] for v in vendors for g in v['groups']})
+    # Group records carry a metric only for the axes their own workbook has, so
+    # a matrix is built only for an axis some vendor actually priced, and every
+    # cell is read with .get(): a vendor missing that axis reads as '—', never
+    # as a KeyError and never as a zero.
     comparison = {}
-    for key, field in (('labour_dev', 'labour_dev_pct'), ('material_dev', 'material_dev_pct'),
-                       ('quantity_over', 'quantity_over')):
-        comparison[key] = {g: {v['vendor']: next((x[field] for x in v['groups'] if x['group'] == g), None)
+    for axis, key, field in (('labour', 'labour_dev', 'labour_dev_pct'),
+                             ('material', 'material_dev', 'material_dev_pct'),
+                             ('quantity', 'quantity_over', 'quantity_over')):
+        if not any(axis in v['axes'] for v in vendors):
+            continue
+        comparison[key] = {g: {v['vendor']: next((x.get(field) for x in v['groups'] if x['group'] == g), None)
                                for v in vendors} for g in groups}
     sigs = [signature(v, vendors) for v in vendors]
     return {'tolerance': tol, 'tolerance_source': source, 'vendors': vendors, 'files_skipped': skipped,

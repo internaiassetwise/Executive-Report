@@ -24,8 +24,13 @@ async function ready(id) {
   return runtime;
 }
 self.onmessage = async ({data:{id,action,payload}}) => {
+  // Every global set below is released here, including on failure: an
+  // abandoned _input_bytes would keep a whole workbook alive in Pyodide until
+  // the worker is terminated.
+  const temporaries = ['_input_bytes','_filename','_boq_names','_boq_bytes','_boq_tol','_request_json','_request_action','_report_progress'];
+  let py;
   try {
-    const py = await ready(id);
+    py = await ready(id);
     const opening = {inspect:'กำลังทำความเข้าใจข้อมูล…', boq:'กำลังอ่านไฟล์และตรวจโครงสร้าง BOQ…', boq_rebuild:'กำลังคำนวณใหม่ตามเกณฑ์ที่กำหนด…'};
     self.postMessage({id,status:'progress',message:opening[action]||'กำลังคำนวณและตรวจสอบหลักฐาน…',progress:65});
     if(action==='inspect_files') {
@@ -39,8 +44,10 @@ self.onmessage = async ({data:{id,action,payload}}) => {
     } else if(action==='inspect') {
       py.globals.set('_input_bytes',new Uint8Array(payload.bytes));
       py.globals.set('_filename',payload.filename);
-      const result=await py.runPythonAsync("json.dumps(inspect(bytes(_input_bytes.to_py()), _filename), ensure_ascii=False, allow_nan=False)");
-      py.globals.delete('_input_bytes');
+      // Detection reports per sheet so a slow workbook keeps the client's
+      // inactivity timer alive instead of being cancelled part-way through.
+      py.globals.set('_report_progress',(done,total,sheet)=>self.postMessage({id,status:'progress',message:`กำลังอ่านชีต ${done} / ${total} · ${sheet}`,progress:65+Math.round(done/total*30)}));
+      const result=await py.runPythonAsync("json.dumps(inspect(bytes(_input_bytes.to_py()), _filename, None, _report_progress), ensure_ascii=False, allow_nan=False)");
       self.postMessage({id,status:'complete',result:JSON.parse(result)});
     } else if(action==='boq'||action==='boq_rebuild') {
       // Bytes cross into Python as typed arrays, never through JSON.
@@ -54,17 +61,19 @@ self.onmessage = async ({data:{id,action,payload}}) => {
         ?"json.dumps(dispatch('boq', {'files':[{'filename':n,'bytes':bytes(b.to_py())} for n,b in zip(_boq_names.to_py(), _boq_bytes)], 'tolerance': _boq_tol}, _report_progress), ensure_ascii=False, allow_nan=False)"
         :"json.dumps(dispatch('boq_rebuild', {'tolerance': _boq_tol}), ensure_ascii=False, allow_nan=False)";
       const result=await py.runPythonAsync(code);
-      for(const name of ['_boq_names','_boq_bytes','_boq_tol','_report_progress'])if(py.globals.has(name))py.globals.delete(name);
       self.postMessage({id,status:'complete',result:JSON.parse(result)});
     } else {
       py.globals.set('_request_json',JSON.stringify(payload));
       py.globals.set('_request_action',action);
       py.globals.set('_report_progress',(done,total,sheet)=>self.postMessage({id,status:'progress',message:`กำลังวิเคราะห์ตาราง ${done} / ${total} · ${sheet}`,progress:10+Math.round(done/total*85)}));
       const result=await py.runPythonAsync("json.dumps(dispatch(_request_action, json.loads(_request_json), _report_progress), ensure_ascii=False, allow_nan=False)");
-      py.globals.delete('_report_progress');
       self.postMessage({id,status:'complete',result:JSON.parse(result)});
     }
   } catch(error) {
     self.postMessage({id,status:'error',message:String(error.message||error).split('\n').filter(Boolean).slice(-1)[0]});
+  } finally {
+    for(const name of temporaries){
+      try{if(py?.globals?.has(name))py.globals.delete(name);}catch{}
+    }
   }
 };

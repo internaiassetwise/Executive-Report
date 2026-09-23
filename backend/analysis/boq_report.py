@@ -76,7 +76,7 @@ def vendor_block(v, tol):
     return '\n'.join(out)
 
 
-def intro_block(rep, filenames):
+def intro_block(rep):
     V = rep['vendors']
     tol = rep['tolerance'] * 100
     refs = sorted({v['benchmark'] for v in V})
@@ -126,6 +126,9 @@ def comparison_block(rep):
     for title, key, fmt in ((f'% ค่าแรงสูงกว่า {ref} แยกหมวดงาน (ถ่วงน้ำหนักตามมูลค่า)', 'labour_dev', lambda x: pct(x, True)),
                             (f'% ค่าของสูงกว่า {ref} แยกหมวดงาน (ถ่วงน้ำหนักตามมูลค่า)', 'material_dev', lambda x: pct(x, True)),
                             (f'จำนวนรายการปริมาณเกิน {ref} >{tol} แยกหมวดงาน', 'quantity_over', n)):
+        # An axis no uploaded workbook carries has no matrix to render.
+        if key not in C:
+            continue
         out.append(f'<h3>ตารางเปรียบเทียบ: {esc(title)}</h3>')
         out.append(table(['หมวดงาน'] + names, [[g] + [fmt(C[key][g].get(v)) for v in names] for g in groups]))
     out.append('<h3>สรุปแนวโน้มเฉพาะตัวของแต่ละเจ้า (Signature Pattern)</h3>')
@@ -150,7 +153,9 @@ def executive_block(rep):
 
 def render(rep, filenames=None, generated=None):
     V = rep['vendors']
-    filenames = filenames or [v['filename'] for v in V]
+    # One line per uploaded file, not one per vendor: a single workbook holding
+    # three vendors is still one source file on the cover page.
+    filenames = filenames or rep.get('files') or list(dict.fromkeys(v['filename'] for v in V))
     generated = generated or date.today().isoformat()
     projects = sorted({v['project'] for v in V if v.get('project')})
     names = ', '.join(v['vendor'] for v in V)
@@ -169,7 +174,7 @@ def render(rep, filenames=None, generated=None):
    วันที่จัดทำ: {esc(generated)}
   </div>
  </div>""")
-    pages.append(intro_block(rep, filenames) + '\n' + vendor_block(V[0], rep['tolerance']))
+    pages.append(intro_block(rep) + '\n' + vendor_block(V[0], rep['tolerance']))
     for v in V[1:]:
         pages.append(vendor_block(v, rep['tolerance']))
     if len(V) > 1:

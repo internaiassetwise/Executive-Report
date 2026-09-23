@@ -4,7 +4,7 @@ A usable initial implementation of a domain-agnostic Excel analysis workspace. T
 
 ## Runtime
 
-The local project has two npm workspaces: `frontend/` (React/Vinext on port 3000) and `backend/` (Node HTTP API on loopback port 8000). The earlier hosted Site is unchanged. Local Sites metadata is ignored by Git; the build enables Sites only when this file exists, so a fresh clone can run without deployment identifiers. A dedicated browser Web Worker runs Pyodide 0.27.7, CPython statistics, openpyxl 3.1.5 and xlrd 2.0.2. Workbook data remains in browser memory. Refresh/reset clears it. The first analysis needs internet access to load Python and parser packages. No file or dataset is persisted.
+The local project has two npm workspaces: `frontend/` (React/Vinext on port 3000) and `backend/` (Node HTTP API on port 8000, bound to `0.0.0.0` so a deployment can reach it over a private network; locally it is used through loopback). The earlier hosted Site is unchanged. Local Sites metadata is ignored by Git; the build enables Sites only when this file exists, so a fresh clone can run without deployment identifiers. A dedicated browser Web Worker runs Pyodide 0.27.7, CPython statistics, openpyxl 3.1.5 and xlrd 2.0.2. Workbook data remains in browser memory. Refresh/reset clears it. The first analysis needs internet access to load Python and parser packages. No file or dataset is persisted.
 
 `File → workbook inspection → table detection → profiles/quality → eligible plan → selected Python calculations → evidence → dynamic Report JSON → React A4 report → browser PDF printing`
 
@@ -18,7 +18,7 @@ Optional Gemini: user explicitly chooses interpretation; only calculated finding
 - `frontend/lib/models.ts`: canonical UI-facing models.
 - `frontend/app/page.tsx`: workflow and ephemeral UI state.
 - `frontend/components/report-view.tsx`: report consumes only Report JSON; chart values come from Python.
-- `backend/src/gemini.mjs`: optional server-side Gemini abstraction with evidence-ID validation and rejection of generated numeric digits.
+- `backend/src/gemini.mjs`: optional server-side Gemini abstraction with evidence-ID validation and a numeric grounding check. Every figure in the generated text must match a figure in the evidence that insight cites, read at the precision the text used, so a rounded quotation of a supplied value passes and an invented one is rejected. Evidence-ID citations are not read as figures. Non-ASCII numerals are rejected outright.
 
 ## Local lifecycle
 

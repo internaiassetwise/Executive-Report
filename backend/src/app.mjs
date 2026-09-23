@@ -2,14 +2,21 @@ import { readFile } from 'node:fs/promises';
 import { configured, interpret } from './gemini.mjs';
 import { writeReport } from './report-writer.mjs';
 import { planReport } from './analysis-planner.mjs';
+import { createDatasetService } from './datasets.mjs';
+import { DEFAULT_DATASET_MODEL } from './dataset-ai.mjs';
 
 export function createHandler(config, fetcher = fetch) {
-  return async function handle(request) {
+  let datasets;
+  async function handle(request) {
     const path = new URL(request.url).pathname;
     if(path==='/api/plan')return request.method==='POST'?planReport(request,config,fetcher):Response.json({error:'Method not allowed'},{status:405});
     if (path === '/api/report') {
       if(request.method === 'POST') return writeReport(request, config, fetcher);
       return Response.json({error:'Method not allowed'}, {status:405});
+    }
+    if (path === '/api/datasets' || path.startsWith('/api/datasets/')) {
+      datasets ||= createDatasetService({ autoAnalyze: true, apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, fetcher, ...config.datasets, allowedOrigins: config.allowedOrigins });
+      return datasets.handle(request);
     }
     if (path === '/api/health' && request.method === 'GET') {
       return Response.json({ status: 'ok', service: 'asw-backend' });
@@ -27,5 +34,7 @@ export function createHandler(config, fetcher = fetch) {
       return Response.json({ error: 'Method not allowed' }, { status: 405 });
     }
     return Response.json({ error: 'Not found' }, { status: 404 });
-  };
+  }
+  handle.close = async () => { await datasets?.close(); };
+  return handle;
 }

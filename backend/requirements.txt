@@ -1,3 +1,7 @@
-# CPython tests of the same engine used by the browser runtime.
+# Runtime dependency for the backend CSV/XLSX dataset worker.
 openpyxl==3.1.5
+# Vector PDF reports and Thai text shaping.
+reportlab>=4.4,<5
+uharfbuzz>=0.50,<1
+# Retained for regression tests of the legacy XLS analysis engine.
 xlrd==2.0.2

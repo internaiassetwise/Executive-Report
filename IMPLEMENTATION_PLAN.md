@@ -1,6 +1,16 @@
-# Implementation status
+# ASW Data Insight — implementation status
 
-## Implemented and tested
+The active UI uses a single CSV/XLSX pipeline for all datasets, including tabular BOQ. Original AssetWise branding/navy theme is retained.
+
+1. Upload/validation/parser/preview: implemented with backend Python and bounded temporary SQLite storage.
+2. Data profiling: implemented with full-data deterministic statistics, quality checks, categories, date ranges, outliers and bounded correlation selection.
+3. Structured AI: implemented using gemini-3-flash-preview, minimal thinking, one bounded aggregate request, schema/evidence/numeric validation, timeout and explicit unavailable/error fallback. A server-side API key is required for live AI calls.
+4. Dashboard: dynamic KPIs and validated chart data/types from actual dataset columns, no hardcoded business metrics.
+5. Report: ten data-grounded sections with provenance, uncertainty and AI interpretation when available.
+6. Export: typeset PDF with Thai text, Excel summary and sheet CSV with formula-injection safeguards.
+7. UX: upload/processing/error/retry, Dashboard/Report/Data/Analysis navigation, pagination, responsive layouts and original branding.
+
+Legacy AI-planned report / BOQ flow (code retained; not mounted on the home page):
 
 1. Workbook readers: XLSX, XLS, CSV; Thai/English; visible/hidden inspection and formula-cache warnings.
 2. Table detector: displaced headers, supported merged header parents, separate vertical/horizontal regions, partial/headerless tables, ranges and confidence.
@@ -15,7 +25,11 @@
 11. The upload entry point probes for BOQ comparison structure first. Detected BOQ files use the original deterministic comparison engine and A4 renderer with Gemini replacing narrative slots only; non-BOQ files fall through to the generic AI-planned report without a second file parse.
 11. Partial processing is disclosed in report UI and JSON. In-memory successful-request checkpoints support retry without resending successful parts; no durable background queue yet.
 
-## Remaining for the full production brief
+This completes the requested local product workflow; it is not a claim of public multi-tenant operational readiness. Authentication/ownership, multi-replica durable jobs, crash-safe persistent retention and production deployment remain environment-level work before public rollout. Complex merged/multiple-table spreadsheet layouts require normalization to one rectangular table per sheet.
+
+Existing generic/BOQ modules and uncommitted edits were preserved outside the active path. Historical docs/PHASE_1.md records the earlier checkpoint; README.md and docs/DATA_PIPELINE.md describe the current product.
+
+## Legacy AI report / BOQ flow: remaining work
 
 - Optional manual header/region, role, date-format and unit overrides; richer semantic understanding. Current automatic mode limits ambiguous tables to quality checks instead of asking questions or guessing.
 - Stronger multi-row header, note/summary-region and arbitrary sparse-layout detection. Multi-sheet relationships require explicit keys and cardinality checks.

@@ -11,7 +11,9 @@ export function evidenceBatches(evidence:Evidence[],objective:string){
   const source=`ที่มา ${e.source.sheet}!${e.source.range} (${e.source.table_id})`;
   const entry={evidence_id:e.evidence_id,finding:e.finding,method:`${source} · ${e.method}`};
   if(entry.finding.length>2000||entry.method.length>500)throw new Error('ข้อความหลักฐานยาวเกินขอบเขต Gemini ผลคำนวณทั้งหมดอยู่ในรายงานแล้ว');
-  if(batch.length===100||encoder.encode(JSON.stringify({evidence:[...batch,entry],objective})).byteLength>80000){batches.push(batch);batch=[];}
+  // Only a non-empty batch can be closed: flushing an empty one would send the
+  // backend a request it rejects and still leave the oversized entry unsplit.
+  if(batch.length&&(batch.length===100||encoder.encode(JSON.stringify({evidence:[...batch,entry],objective})).byteLength>80000)){batches.push(batch);batch=[];}
   batch.push(entry);
  }
  if(batch.length)batches.push(batch);

@@ -62,6 +62,21 @@ test('invented evidence IDs and numerical statements remain rejected', async () 
   }
 });
 
+test('an insight may cite its evidence ID in prose without being read as a number', async () => {
+  // The system prompt asks for these citations, so 'EV-001' must not be
+  // mistaken for the figure 1 and sink the whole batch.
+  const cited = { ...insight, interpretation: 'ตามหลักฐาน EV-001 ค่าเฉลี่ย 12 อยู่ในเกณฑ์' };
+  const handle = createHandler(config, async () => result([cited]));
+  const response = await handle(request(payload));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { insights: [cited] });
+});
+
+test('a citation does not license an unsupported figure beside it', async () => {
+  const handle = createHandler(config, async () => result([{ ...insight, interpretation: 'ตามหลักฐาน EV-001 ค่าเฉลี่ย 99' }]));
+  assert.equal((await handle(request(payload))).status, 502);
+});
+
 test('provider failure is handled without leaking request or key', async () => {
   const handle = createHandler(config, async () => { throw new Error('test-only-key'); });
   const response = await handle(request(payload));

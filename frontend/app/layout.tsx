@@ -1,6 +1,9 @@
 import type { Metadata } from 'next';
 import './globals.css';
-import './workspace.css';
-import './flow.css';
-export const metadata: Metadata = {title:'ASW Data Insight | Excel Analysis & Reports',description:'วิเคราะห์ข้อมูล Excel ตรวจสอบคุณภาพข้อมูล และสร้างรายงานที่ตรวจสอบหลักฐานได้'};
+import './analyst.css';
+import './insights.css';
+export const metadata: Metadata = {
+  title: 'AI Data Analyst | Turn Excel & CSV into Business Reports',
+  description: 'Upload your CSV or Excel file and let AI turn it into an understandable executive business report and interactive dashboard.',
+};
 export default function RootLayout({children}:Readonly<{children:React.ReactNode}>){return <html lang="th"><body>{children}</body></html>}

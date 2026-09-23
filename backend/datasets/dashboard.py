@@ -170,13 +170,18 @@ def plan(profiles, filename="", sheet_id=None):
         roles = [column.get("role") for column in profile["columns"]]
         # A summary sheet is what a reader wants first, even when detail sheets are longer.
         # The stacked all-sheets view comes first, then a summary sheet, then the longest sheet.
+        # A table read from a picture is used only when nothing else has numbers; a pivot
+        # table comes after the sheet it summarises.
         combined = profile["sheet_name"].startswith("รวมทุกชีต")
-        return ("measure" in roles, combined, bool(SUMMARY_SHEET.search(profile["sheet_name"])), "dimension" in roles or "time" in roles or "attribute" in roles, profile["rows_count"])
+        from_cells = profile.get("source") != "image_ocr"
+        return ("measure" in roles, from_cells, combined, bool(SUMMARY_SHEET.search(profile["sheet_name"])), not profile.get("pivot"),
+                "dimension" in roles or "time" in roles or "attribute" in roles, profile["rows_count"])
     candidates = [p for p in profiles if p["sheet_id"] == sheet_id] if sheet_id else profiles
     if not candidates:
         _fail("INVALID_SPEC", "ไม่พบชีตที่เลือก")
     profile = max(candidates, key=score)
-    columns = profile["columns"]
+    # Hidden columns are the author's helpers; use them only when nothing else is left.
+    columns = [column for column in profile["columns"] if not column.get("hidden")] or profile["columns"]
     # Amounts that add up come first; per-unit prices are averaged and shown last.
     rank = {"money": 0, "quantity": 1, None: 2, "score": 3, "percent": 3, "price": 4}
     measures = sorted((c for c in columns if c.get("role") == "measure"), key=lambda c: (rank.get(c.get("meaning"), 2), c["missing_count"]))
@@ -391,6 +396,29 @@ def referenced(spec):
     return keys
 
 
+def _trace(sheet, key, agg, rows, excluded, filtered, x=None):
+    """Where a number comes from: the sheet, the cell range of its column, the rows
+    counted and what was left out, so a reader can check it against the file."""
+    source = sheet.get("source_sheet") or sheet["name"]
+    columns = {column["key"]: column for column in sheet["columns"]}
+    area = sheet.get("area") or {}
+    trace = {"sheet": source, "table": sheet["name"], "agg": agg, "rows": rows, "excluded_summary_rows": excluded, "filtered": filtered}
+    column = columns.get(key) if key else None
+    if column:
+        trace["column"] = column["name"]
+        if column.get("letter") and area.get("first_row"):
+            trace["range"] = f"'{source}'!{column['letter']}{area['first_row']}:{column['letter']}{area['last_row']}"
+    elif area.get("ref"):
+        trace["range"] = f"'{source}'!{area['ref']}"
+    if x and columns.get(x):
+        trace["group_by"] = columns[x]["name"]
+    if sheet.get("combined_from"):
+        trace["combined_from"] = sheet["combined_from"][:60]
+    if sheet.get("source") == "image_ocr":
+        trace["from_image"] = True
+    return trace
+
+
 def run(sqlite_path, payload):
     """Validate the spec, apply filters and compute every KPI and chart for one request."""
     if not isinstance(payload, dict) or not isinstance(payload.get("profiles"), list):
@@ -420,11 +448,12 @@ def run(sqlite_path, payload):
                   "rows_total": connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0],
                   "rows_matched": connection.execute(f"SELECT COUNT(*) FROM {table}{_where(where)}", params).fetchone()[0],
                   "kpis": [], "charts": []}
+        trace = lambda key, agg, x=None: _trace(sheet, key, agg, result["rows_matched"], len(summary), bool(where), x)
         for kpi in spec["kpis"]:
-            result["kpis"].append({"id": kpi["id"], "value": _kpi(connection, table, kpi, where, params)})
+            result["kpis"].append({"id": kpi["id"], "value": _kpi(connection, table, kpi, where, params), "trace": trace(kpi["column"], kpi["agg"])})
         for chart in spec["charts"]:
             try:
-                result["charts"].append({"id": chart["id"], **_chart(connection, table, columns, chart, where, params)})
+                result["charts"].append({"id": chart["id"], **_chart(connection, table, columns, chart, where, params), "trace": trace(chart.get("y"), chart.get("agg"), chart.get("x"))})
             except (sqlite3.Error, ValueError, OverflowError, ZeroDivisionError):
                 result["charts"].append({"id": chart["id"], "data": [], "error": "คำนวณกราฟนี้ไม่สำเร็จ"})
         if payload.get("include_options"):

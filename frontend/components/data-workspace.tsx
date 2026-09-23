@@ -251,7 +251,7 @@ export function DataWorkspace() {
             <p className="office-muted">เคล็ดลับ: แถวแรกของแต่ละชีตควรเป็นหัวคอลัมน์ และหนึ่งชีตควรมีตารางเดียว{config ? ` · สูงสุด ${config.max_rows.toLocaleString('th-TH')} แถว` : ''}</p>
           </aside>
         </div>}
-      <footer className="office-footer"><ShieldCheck size={15} aria-hidden="true" />{config ? `ไฟล์เก็บไว้ชั่วคราว ${config.retention_minutes} นาที แล้วลบอัตโนมัติ · ไม่ส่งข้อมูลรายแถวออกนอกระบบ` : 'ไฟล์ประมวลผลบนเซิร์ฟเวอร์ของระบบ'}</footer>
+      <footer className="office-footer"><ShieldCheck size={15} aria-hidden="true" />{config ? `ไฟล์เก็บไว้ชั่วคราว ${config.retention_minutes} นาที แล้วลบอัตโนมัติ · ตัวเลขทุกค่าคำนวณในระบบ ส่งเพียงแถวแรกของแต่ละชีตและรูปภาพในไฟล์ให้ระบบอ่านโครงสร้าง` : 'ไฟล์ประมวลผลบนเซิร์ฟเวอร์ของระบบ'}</footer>
     </main>
   </div>;
 }

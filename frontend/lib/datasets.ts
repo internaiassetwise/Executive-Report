@@ -1,5 +1,10 @@
 export type DataType = 'number' | 'text' | 'date' | 'boolean' | 'mixed' | 'empty';
-export interface DataColumn { key: string; name: string; data_type: DataType }
+export interface DataColumn {
+  key: string; name: string; data_type: DataType;
+  /** Source column in the sheet (1-based) and its letter. */
+  col?: number; letter?: string;
+  number_format?: string; formula?: string; formula_rows?: number; hidden?: boolean;
+}
 export interface DataSheet {
   id: string;
   name: string;
@@ -9,6 +14,31 @@ export interface DataSheet {
   warnings: string[];
   /** Set on the stacked view of sheets that share one header row. */
   combined_from?: string[];
+  /** The worksheet this table was read from, and where. */
+  source_sheet?: string | null;
+  area?: { first_row: number; last_row: number; first_col: number; last_col: number; ref: string };
+  title_lines?: string[];
+  footnotes?: string[];
+  layout_source?: 'excel_table' | 'proposed' | 'guessed';
+  /** image_ocr: read from a picture in the file, not from cells. */
+  source?: 'image_ocr';
+  image_cell?: string | null;
+  pivot?: string;
+}
+/** Structure of the uploaded file (the workbook part of the dataset IR). */
+export interface WorkbookFacts {
+  sheets: { name: string; state: string; kind: string; hidden_rows: number; hidden_columns: string[]; merged_ranges: number; formulas: number; comments: number; hyperlinks: number; tables: string[] }[];
+  excel_tables: { name: string; sheet: string; ref: string; columns: string[]; totals_row: boolean }[];
+  defined_names: { name: string; ref: string }[];
+  charts: { id: string; sheet: string; cell: string | null; type: string; title: string; series: { name?: string; values_column?: { column_name: string }; categories_column?: { column_name: string } }[] }[];
+  pivots: { name: string; sheet: string; ref: string | null; source_sheet: string | null; source_ref: string | null }[];
+  images: { id: string; sheet: string; cell: string | null; content_type: string; kind: string | null; description: string | null; text: string | null; table_sheet: string | null; read: boolean }[];
+  comments: { sheet: string; cell: string; text: string }[];
+  hyperlinks: { sheet: string; cell: string; target: string }[];
+  text_boxes: { sheet: string; cell: string | null; text: string }[];
+  relationships: { from: string; to: string; via: 'formula' | 'pivot' | 'chart'; count: number }[];
+  external_links: number;
+  has_macros: boolean;
 }
 export interface Dataset {
   filename: string;
@@ -17,6 +47,7 @@ export interface Dataset {
   sheets: DataSheet[];
   warnings: string[];
   created_at: string;
+  workbook?: WorkbookFacts;
 }
 export interface DatasetJob {
   id: string;

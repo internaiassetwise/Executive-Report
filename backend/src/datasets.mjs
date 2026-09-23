@@ -6,6 +6,7 @@ import { extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { analyzeWithAi, DEFAULT_DATASET_MODEL } from './dataset-ai.mjs';
 import { renderDashboardHtml } from './dashboard-html.mjs';
+import { describeImages } from './image-ai.mjs';
 import { planLayouts } from './layout-ai.mjs';
 import { describeFilter, formatNumber } from '../../shared/dashboard-charts.mjs';
 
@@ -275,9 +276,18 @@ export function createDatasetService(options = {}) {
       job.stage = 'understanding_columns';
       await worker(job, ['sample', input, filename, samplePath, JSON.stringify(limits)], undefined, config.timeoutMs, job.controller.signal);
       const sample = JSON.parse(await readFile(samplePath, 'utf8'));
-      const layouts = await planLayouts(sample, config.llm, job.controller.signal);
-      if (!Object.keys(layouts).length) return [];
-      await writeFile(layoutPath, JSON.stringify(layouts), { mode: 0o600 });
+      // Table positions and the pictures' contents are read in parallel; either may fail alone.
+      const [layouts, images] = await Promise.allSettled([
+        planLayouts(sample, config.llm, job.controller.signal),
+        describeImages(sample.images, config.llm, job.controller.signal),
+      ]);
+      if (job.controller.signal.aborted) throw job.controller.signal.reason;
+      for (const [name, outcome] of [['layout', layouts], ['images', images]]) {
+        if (outcome.status === 'rejected') console.warn(JSON.stringify({ event: `${name}_fallback`, reason: outcome.reason?.kind || outcome.reason?.code || 'error' }));
+      }
+      const plan = { layouts: layouts.value || {}, images: images.value || [] };
+      if (!Object.keys(plan.layouts).length && !plan.images.length) return [];
+      await writeFile(layoutPath, JSON.stringify(plan), { mode: 0o600 });
       return [layoutPath];
     } catch (error) {
       if (job.controller.signal.aborted) throw error;
@@ -285,6 +295,7 @@ export function createDatasetService(options = {}) {
       return [];
     } finally {
       await rm(samplePath, { force: true });
+      await rm(join(directory, 'images'), { recursive: true, force: true });
     }
   }
 

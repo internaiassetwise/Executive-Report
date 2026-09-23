@@ -183,6 +183,42 @@ class ExcelFixtureTests(unittest.TestCase):
         self.assertEqual(summary["columns"][2]["number_format"], "0.0%")
         self.assertEqual(self.rows(total["id"]), [(2, ["มูลค่ารวม", 150000])])
 
+    def test_messy_boq_with_the_layout_the_model_proposed(self):
+        # As returned by the live layout request: one BOQ table over both page blocks, ending before the notes.
+        proposed = {"layouts": {"BOQ ตึก A": {"tables": [
+            {"title": "ใบเสนอราคา / BOQ โครงการอาคาร A", "header_rows": [5, 6], "data_start": 7, "data_end": 16, "first_col": 1, "last_col": 6,
+             "column_names": ["ลำดับ", "หมวดงาน", "รายการ", "จำนวน", "ราคา (บาท) / ต่อหน่วย", "ราคา (บาท) / รวม"]},
+            {"title": "สรุปตามหมวดงาน", "header_rows": [21], "data_start": 22, "data_end": 23, "first_col": 1, "last_col": 3,
+             "column_names": ["หมวดงาน", "มูลค่า (บาท)", "สัดส่วน"]}]}}}
+        result = self.read("messy_real_world.xlsx", proposed)
+        boq, summary, _ = result["sheets"]
+        self.assertEqual(boq["layout_source"], "proposed")
+        self.assertEqual([row[0] for row in self.rows(boq["id"])], [7, 8, 9, 10, 14, 15, 16], "the reprinted header inside the table is skipped")
+        self.assertEqual(boq["footnotes"], ["หมายเหตุ: ราคารวมภาษีมูลค่าเพิ่ม 7% แล้ว", "ลงชื่อ ............ ผู้จัดทำ"])
+        self.assertEqual(boq["summary_rows"], [10, 16])
+        self.assertEqual(summary["rows_count"], 2)
+        self.assertFalse(any(sheet.get("combined_from") for sheet in result["sheets"]))
+
+    def test_dashboard_numbers_trace_back_to_the_file(self):
+        from analyzer import analyze
+        from dashboard import plan, run
+        self.read("messy_real_world.xlsx")
+        analysis = analyze(self.database)
+        profile = analysis["profiles"][0]
+        self.assertTrue(next(c for c in profile["columns"] if c["key"] == "c6")["hidden"])
+        spec = plan(analysis["profiles"], "messy_real_world.xlsx", "s0")
+        self.assertNotIn("c6", {item.get("column") for item in spec["kpis"] + spec["filters"]}, "hidden helper columns are not planned")
+        spec["kpis"] = [{"id": "k1", "label": "มูลค่ารวม", "column": "c5", "agg": "sum"}]
+        result = run(self.database, {"spec": spec, "profiles": analysis["profiles"]})
+        total = result["kpis"][0]
+        self.assertEqual(total["value"], 150000, "subtotal and grand total lines are not added again")
+        self.assertEqual(total["trace"]["range"], "'BOQ ตึก A'!F7:F16")
+        self.assertEqual((total["trace"]["rows"], total["trace"]["excluded_summary_rows"]), (5, 2))
+        self.assertEqual(total["trace"]["column"], "ราคา (บาท) / รวม")
+        self.read("thai.xlsx")
+        columns = {c["name"]: c for c in analyze(self.database)["profiles"][0]["columns"]}
+        self.assertEqual((columns["จำนวนเงิน"]["meaning"], columns["สัดส่วน"]["meaning"]), ("money", "percent"))
+
     def test_legacy_xls_merges_hidden_rows_and_formats(self):
         result = self.read("legacy.xls")
         sheet = result["sheets"][0]

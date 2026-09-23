@@ -18,6 +18,7 @@ PRICE = re.compile(r"ราคา|ค่าของ|ค่าแรง|ต่�
 CURRENCY = re.compile(r"\(บาท\)|บาท|\bthb\b|\busd\b|฿|\$", re.I)
 QUANTITY = re.compile(r"\bqty\b|quantity|\bunits?\b|\bcount\b|orders?|จำนวน|ปริมาณ|ชิ้น", re.I)
 PERCENT = re.compile(r"percent|\bpct\b|%|\brate\b|ratio|ร้อยละ|อัตรา|สัดส่วน", re.I)
+CURRENCY_FORMAT = re.compile(r"฿|\$|€|£|¥|\[\$|บาท", re.I)
 SCORE = re.compile(r"score|rating|คะแนน", re.I)
 NOTE = re.compile(r"หมายเหตุ|remark|note|comment|flag|ความเห็น|รายละเอียด|description", re.I)
 UNIT = re.compile(r"^(?:หน่วย|unit|uom|unit of measure)\b", re.I)
@@ -26,7 +27,12 @@ YEAR_MONTH = re.compile(r"\d{4}-(?:0[1-9]|1[0-2])")
 CATEGORY_MAX_UNIQUE = 200
 
 
-def _meaning(name, values):
+def _meaning(name, values, number_format=None):
+    # The cell format the author chose is stronger evidence than the header text.
+    if number_format and "%" in number_format:
+        return "percent"
+    if number_format and CURRENCY_FORMAT.search(number_format):
+        return "price" if PRICE.search(name) and not TOTAL.search(name) else "money"
     if PERCENT.search(name) and not TOTAL.search(name):
         return "percent"
     if SCORE.search(name):
@@ -62,7 +68,7 @@ def annotate(profile, numeric, dates, counters, is_identifier):
             if is_identifier(column, values, rows):
                 kind, role = "identifier", "identifier"
             else:
-                role, meaning = "measure", _meaning(name, values)
+                role, meaning = "measure", _meaning(name, values, column.get("number_format"))
         elif column["data_type"] in ("text", "mixed"):
             unique = column["unique_count"]
             if ID_NAME.search(name) and unique >= present * .9:

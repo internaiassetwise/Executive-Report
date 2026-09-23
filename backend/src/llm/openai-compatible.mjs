@@ -5,13 +5,15 @@
 export function createOpenAiCompatibleProvider({ apiKey, model, baseUrl, fetcher, LlmError }) {
   const endpoint = `${String(baseUrl).replace(/\/$/, '')}/chat/completions`;
   return {
-    async generateJson({ system, prompt, schema, maxOutputTokens = 4000, temperature = 0.2, signal }) {
+    async generateJson({ system, prompt, schema, images = [], maxOutputTokens = 4000, temperature = 0.2, signal }) {
       const response = await fetcher(endpoint, {
         method: 'POST', signal,
         headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
         body: JSON.stringify({
           model, temperature, max_tokens: maxOutputTokens,
-          messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }],
+          messages: [{ role: 'system', content: system }, { role: 'user', content: images.length
+            ? [{ type: 'text', text: prompt }, ...images.map(image => ({ type: 'image_url', image_url: { url: `data:${image.mimeType};base64,${image.data}` } }))]
+            : prompt }],
           response_format: { type: 'json_schema', json_schema: { name: 'result', schema, strict: false } },
         }),
       });

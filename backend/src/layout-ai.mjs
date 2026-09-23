@@ -8,19 +8,23 @@ const SYSTEM = [
   'Each sample row has its sheet row number and non-empty cells keyed by column letter (A=1, B=2, ...).',
   'For every data table give: header_rows = the row number(s) holding column labels (at most 4; include a group row above sub-headers only when it labels groups of columns; never include report titles, company names, dates, page notes or signature lines); data_start = first data row; data_end = last data row when the table clearly ends inside the sample (a total block, notes or another table follows), otherwise 0; first_col and last_col = column numbers of the table (last_col 0 when unsure).',
   'column_names: one clean name per column from first_col, in order, written as in the sheet (Thai or English); join a group label and its sub-label as "Group / Sub"; for a blank header over data use a short plain name only when the values make it obvious, else "".',
-  'A table without a label row has header_rows [] and names from the values. Keep subtotal and total lines inside the table; the application handles them. Several tables in one sheet are allowed when separated by blank rows or new label rows.',
+  'A table without a label row has header_rows [] and names from the values. Keep subtotal and total lines inside the table; the application handles them. Several tables in one sheet are allowed when separated by blank rows and new, different label rows.',
+  'The same label rows printed again further down (page breaks, one block per category) do NOT start a new table: keep one table whose data_end covers every block; the application skips the repeated labels. Notes, remarks and signature lines under a table are not data: end the table before them.',
   'Return only sheets listed in the input, with no data values or calculations.',
 ].join('\n');
 
+// Gemini rejects schemas whose nested maxItems multiply into too many states
+// (a 300-name bound inside 6 tables inside 15 sheets fails with a bare 400), so
+// only the top level is bounded; sizes are enforced after the reply (layout.py).
 function schema(sheets) {
   const integer = { type: 'integer' };
   return {
     type: 'object', required: ['sheets'], properties: {
       sheets: { type: 'array', maxItems: sheets.length, items: { type: 'object', required: ['sheet', 'tables'], properties: {
         sheet: { type: 'string', enum: sheets },
-        tables: { type: 'array', maxItems: 6, items: { type: 'object', required: ['title', 'header_rows', 'data_start', 'data_end', 'first_col', 'last_col', 'column_names'], properties: {
-          title: { type: 'string' }, header_rows: { type: 'array', maxItems: 4, items: integer }, data_start: integer, data_end: integer,
-          first_col: integer, last_col: integer, column_names: { type: 'array', maxItems: 300, items: { type: 'string' } },
+        tables: { type: 'array', items: { type: 'object', required: ['title', 'header_rows', 'data_start', 'data_end', 'first_col', 'last_col', 'column_names'], properties: {
+          title: { type: 'string' }, header_rows: { type: 'array', items: integer }, data_start: integer, data_end: integer,
+          first_col: integer, last_col: integer, column_names: { type: 'array', items: { type: 'string' } },
         } } },
       } } },
     },
@@ -41,7 +45,7 @@ export async function planLayouts(sample, llm, signal) {
   for (const entry of Array.isArray(data?.sheets) ? data.sheets : []) {
     const source = sheets.find(item => item.sheet === entry?.sheet);
     if (!source || !Array.isArray(entry.tables) || !entry.tables.length) continue;
-    const tables = entry.tables.map(table => ({
+    const tables = entry.tables.slice(0, 6).map(table => ({
       title: typeof table?.title === 'string' ? table.title : '',
       header_rows: Array.isArray(table?.header_rows) ? table.header_rows : [],
       data_start: table?.data_start, data_end: table?.data_end || null,

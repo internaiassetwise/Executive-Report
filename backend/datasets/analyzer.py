@@ -408,6 +408,15 @@ def analyze(sqlite_path, progress=None):
         for index, sheet in enumerate(dataset["sheets"]):
             progress("profiling", 40 + int(index / len(dataset["sheets"]) * 35))
             profile, counters, numeric, dates = scan_profile(connection, sheet, top_limit)
+            # Workbook facts the semantics use: number formats, hidden helper columns, derived tables.
+            stored = {column["key"]: column for column in sheet["columns"]}
+            for column in profile["columns"]:
+                for field in ("number_format", "hidden", "letter"):
+                    if stored.get(column["key"], {}).get(field):
+                        column[field] = stored[column["key"]][field]
+            for field in ("source", "pivot"):
+                if sheet.get(field):
+                    profile[field] = sheet[field]
             annotate(profile, numeric, dates, counters, likely_identifier)
             progress("patterns", 40 + int((index + .5) / len(dataset["sheets"]) * 35))
             sheet_findings, sheet_charts, sheet_kpis = sheet_patterns(connection, sheet, profile, counters, numeric, dates)
@@ -415,8 +424,10 @@ def analyze(sqlite_path, progress=None):
             findings.append(sheet_findings)
             charts.append(sheet_charts)
             metrics.append(sheet_kpis)
-        # The stacked "all sheets" table repeats source rows; overall totals skip it.
-        originals = [profile for profile, sheet in zip(profiles, dataset["sheets"]) if not sheet.get("combined_from")]
+        # The stacked "all sheets" table and pivot tables repeat source rows, and a table read
+        # from a picture is not cell data; overall totals skip them.
+        originals = [profile for profile, sheet in zip(profiles, dataset["sheets"])
+                     if not sheet.get("combined_from") and not sheet.get("pivot") and sheet.get("source") != "image_ocr"]
         rows_count = sum(profile["rows_count"] for profile in originals)
         missing = sum(profile["missing_count"] for profile in originals)
         duplicates = sum(profile["duplicate_rows"] for profile in originals)

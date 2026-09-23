@@ -670,6 +670,7 @@ def read_sheet(connection, state, result, sheet_name, iterator, visibility, plan
     gap, held, pending, repeated = False, [], None, {}
 
     def process(row_number, values, formulas, extras):
+        taken = False
         for index, table in enumerate(tables):
             sliced = values[table["first_col"] - 1:table["last_col"]] if table["last_col"] else values[table["first_col"] - 1:]
             if row_number in table["header_rows"]:
@@ -702,23 +703,35 @@ def read_sheet(connection, state, result, sheet_name, iterator, visibility, plan
                 elif table.get("title_lines"):
                     writers[index].title_lines = table["title_lines"]
             writers[index].add(row_number, sliced, formulas, limits, sheet_name, slice_extras(extras, table["first_col"], table["last_col"]))
+            taken = True
+        cells = [value for value in values if not blank(value)]
+        if not taken and cells and all(isinstance(value, str) for value in cells) and NOTE_ROW.match(cells[0]):
+            before = [index for index, table in enumerate(tables) if writers[index] is not None and table["data_start"] < row_number]
+            if before and len(writers[before[-1]].footnotes) < 20:
+                writers[before[-1]].footnotes.append(re.sub(r"\s+", " ", " ".join(str(value) for value in cells)).strip()[:200])
 
     def label_row(values):
         cells = layout.filled(values)
         return len(cells) >= 2 and sum(layout.textual(values[i]) for i in cells) / len(cells) >= .8 \
             and not TOTAL_ROW.match(str(values[cells[0]]).strip()) and not NOTE_ROW.match(str(values[cells[0]]))
 
-    def same_header(values):
-        """Every filled cell repeats the header text above it (a reprint may omit a few labels)."""
-        table = tables[-1]
+    def same_header(values, index):
+        """Every filled cell repeats the table's header text above it (a reprint may omit a few labels)."""
+        table = tables[index]
         sliced = values[table["first_col"] - 1:table["last_col"]] if table["last_col"] else values[table["first_col"] - 1:]
         text = lambda value: "" if blank(value) else str(value).strip().casefold()
-        filled = [index for index, value in enumerate(sliced) if not blank(value)]
-        for header in headers[-1].values():
-            labels = [index for index, value in enumerate(header) if not blank(value)]
-            if len(filled) >= 2 and all(index < len(header) and text(sliced[index]) == text(header[index]) for index in filled)                     and len(filled) >= .6 * len(labels):
+        filled = [position for position, value in enumerate(sliced) if not blank(value)]
+        for header in headers[index].values():
+            labels = [position for position, value in enumerate(header) if not blank(value)]
+            if len(filled) >= 2 and len(filled) >= .6 * len(labels) \
+                    and all(position < len(header) and text(sliced[position]) == text(header[position]) for position in filled):
                 return True
         return False
+
+    def inside(row_number):
+        """The table whose data range holds this row, once its first data row was read."""
+        return next((index for index, table in enumerate(tables) if writers[index] is not None and table["data_start"] <= row_number
+                     and (ends[index] is None or row_number <= ends[index])), None)
 
     def start_table(row_number, values, titles):
         cells = layout.filled(values)
@@ -732,6 +745,10 @@ def read_sheet(connection, state, result, sheet_name, iterator, visibility, plan
 
     for row in itertools.chain(buffer, iterator):
         row_number, values = row[0], row[1]
+        current = inside(row_number) if follow else None
+        if current is not None and current != len(tables) - 1 and same_header(values, current):
+            repeated[current] = repeated.get(current, 0) + 1
+            continue
         if not follow or writers[-1] is None or row_number < tables[-1]["data_start"] or len(tables) >= 30:
             process(*row)
             continue
@@ -747,7 +764,7 @@ def read_sheet(connection, state, result, sheet_name, iterator, visibility, plan
             gap = True
             process(*row)
             continue
-        if same_header(values):
+        if same_header(values, len(tables) - 1):
             repeated[len(tables) - 1] = repeated.get(len(tables) - 1, 0) + 1
             continue
         if gap and len(cells) == 1 and layout.textual(values[cells[0]]) and len(held) < 3:
@@ -800,8 +817,11 @@ def image_tables(connection, state, result, notes, limits):
             values = [value if isinstance(value, (str, int, float)) and not isinstance(value, bool) else None for value in row[:len(names)]]
             writer.add(index, [clean_text(value) if isinstance(value, str) else value for value in values], 0, limits, writer.name)
         writer.notes = ["ข้อมูลตารางนี้ระบบอ่านจากรูปภาพในไฟล์ (OCR) ไม่ใช่ค่าจากเซลล์ กรุณาตรวจทานกับรูปต้นฉบับก่อนใช้ตัวเลข"]
-        writer.extra.update(source="image_ocr", image_id=note.get("id"))
+        writer.extra.update(source="image_ocr", image_id=note.get("id"), image_cell=str(note.get("cell") or "")[:10] or None)
+        writer.source_sheet = str(note.get("sheet") or "")[:120] or None
         if writer.finish(result):
+            # Cells of a picture have no sheet range; the trace points at the picture instead.
+            result["sheets"][-1]["area"] = None
             note["table_sheet"] = writer.id
 
 

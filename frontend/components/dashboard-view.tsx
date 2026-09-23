@@ -5,7 +5,7 @@ import type { EChartsType } from 'echarts';
 import { Download, FileCode2, Filter, Lightbulb, LoaderCircle, RefreshCw, RotateCcw, Table2, X } from 'lucide-react';
 import { EChart, type ChartClick } from '@/components/echart';
 import { DataPreview } from '@/components/data-preview';
-import { bucketRange, exportDashboard, queryDashboard, type DashboardFilter, type DashboardResult, type DashboardSpec, type FilterOption } from '@/lib/dashboard';
+import { bucketRange, exportDashboard, queryDashboard, type DashboardFilter, type DashboardResult, type DashboardSpec, type FilterOption, type ValueTrace } from '@/lib/dashboard';
 import { DatasetError, type Dataset } from '@/lib/datasets';
 import type { DatasetAnalysis, ProfileColumn } from '@/lib/dataset-analysis';
 import { AGG_NAMES, chartOption, describeFilter, formatFull, formatNumber, seriesName, type ComputedChart } from '../../shared/dashboard-charts.mjs';
@@ -50,6 +50,14 @@ function RangeFilter({ label, kind, option, current, onChange }: { label: string
     <span aria-hidden="true">–</span>
     <input type={type} aria-label={`${label} ถึง`} value={high ?? ''} min={kind === 'date' ? bound(range.min) : undefined} max={kind === 'date' ? bound(range.max) : undefined} placeholder={kind === 'number' ? formatFull(range.max) : undefined} onChange={event => update('high', event.target.value)} />
   </fieldset>;
+}
+
+/** Where the number comes from in the uploaded file, to check it against the source. */
+function TraceLine({ trace }: { trace?: ValueTrace }) {
+  if (!trace) return null;
+  const where = trace.combined_from ? `${trace.combined_from.length} ชีต (${trace.combined_from.slice(0, 3).join(', ')}${trace.combined_from.length > 3 ? ' …' : ''})` : trace.range || `ชีต ${trace.sheet}`;
+  const detail = [`${formatFull(trace.rows)} แถว${trace.filtered ? 'ตามตัวกรอง' : ''}`, trace.excluded_summary_rows ? `ไม่รวมแถวสรุป ${formatFull(trace.excluded_summary_rows)} แถว` : '', trace.from_image ? 'อ่านจากรูปภาพ' : ''].filter(Boolean).join(' · ');
+  return <em className={`dash-trace${trace.from_image ? ' warn' : ''}`} title={`ที่มา: ${where} · ${detail}`}>ที่มา {where} · {detail}</em>;
 }
 
 export function DashboardView({ id, dataset, analysis, spec: planned }: { id: string; dataset: Dataset; analysis: DatasetAnalysis; spec: DashboardSpec }) {
@@ -133,6 +141,7 @@ export function DashboardView({ id, dataset, analysis, spec: planned }: { id: st
   const insights = summary?.insights?.length && sheetId === planned.sheet_id ? summary.insights.map(item => ({ title: item.title, description: item.description, ids: item.evidence_ids }))
     : analysis.insights.filter(item => item.evidence.sheet === sheet?.name || item.evidence.sheet === 'ทุกชีต').slice(0, 6).map(item => ({ title: item.title, description: item.description, ids: [item.id] }));
   const kpiValue = (kpiId: string) => result?.spec.sheet_id === sheetId ? result.kpis.find(item => item.id === kpiId)?.value ?? null : null;
+  const kpiTrace = (kpiId: string) => result?.spec.sheet_id === sheetId ? result.kpis.find(item => item.id === kpiId)?.trace : undefined;
   const extraFilters = filters.filter(item => !spec?.filters.some(entry => entry.column === item.column));
   const ready = Boolean(result && result.spec.sheet_id === sheetId);
 
@@ -179,6 +188,7 @@ export function DashboardView({ id, dataset, analysis, spec: planned }: { id: st
           <span>{kpi.label}</span>
           <strong title={formatFull(value)}>{ready ? formatNumber(value, columns.get(kpi.column || '')?.meaning, kpi.agg) : '…'}</strong>
           <small>{kpi.column ? `${AGG_NAMES[kpi.agg]} · ${name(kpi.column)}` : 'นับทุกแถวที่ตรงตัวกรอง'}</small>
+          {ready && <TraceLine trace={kpiTrace(kpi.id)} />}
         </article>;
       })}
     </section>}

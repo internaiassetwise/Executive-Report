@@ -40,8 +40,36 @@ const SYSTEM = [
   'PART 2 - dashboard plan. Design ONE dashboard for the most useful sheet: when a sheet named รวมทุกชีต exists (all sheets with the same columns stacked, with columns ชีต and กลุ่มชีต), use it and compare by those columns; otherwise prefer a summary or overview sheet (name contains summary, สรุป or overview). You only choose columns and chart types; the application calculates every number, so never put numbers or claims in titles. Use column keys (c0, c1, ...) exactly as given for the chosen sheet_id. Write a short Thai title and description that name only concepts present in the column names; do not assume columns such as sales or revenue exist.',
   'Pick 3-6 KPIs, 3-8 charts and 1-5 filters that fit the data shape and the objective; never add chart types just for variety. Rules by column role: sum/avg/min/max/median only on role=measure (prefer sum for meaning money or quantity, avg for score, percent or rate); count_distinct on dimension, identifier or attribute; column "none" with agg count means number of rows. meaning=price is a per-unit rate: never sum it, use avg. Subtotal, total and VAT lines are already excluded by the application.',
   'Charts: line or area need x with role=time (area for cumulative-like totals); bar needs x with role=dimension; hbar suits long labels or top-N of role=attribute; donut (8 groups or fewer) or treemap need x with role=dimension; histogram needs x with role=measure and y "none"; scatter needs two different measures. y "none" means row count. grain "auto" lets the application choose. Filters use role time or dimension columns.',
+  'The workbook section describes the file itself: charts its author made (reuse their intent when the columns fit), pivot tables (summaries of another sheet), hidden sheets/columns (helpers: avoid them), Excel tables, notes and footnotes (context such as units or VAT; you may mention them as stated), and pictures read by vision. Sheets with source image_ocr were read from a picture: use them only when no cell-based sheet covers the same data. Pivot sheets repeat their source: prefer the source sheet for totals.',
   'Do not output data rows, markdown or fields beyond the JSON schema.',
 ].join('\n');
+
+/** The structural part of the dataset IR, trimmed for the prompt. */
+function workbookContext(workbook) {
+  if (!workbook || typeof workbook !== 'object') return null;
+  const list = (value, size) => Array.isArray(value) ? value.slice(0, size) : [];
+  const sheets = list(workbook.sheets, 60).map(sheet => ({
+    name: clip(sheet.name, 100), state: sheet.state, kind: sheet.kind, tables: sheet.tables,
+    ...(sheet.hidden_rows ? { hidden_rows: sheet.hidden_rows } : {}), ...(sheet.hidden_columns?.length ? { hidden_columns: sheet.hidden_columns } : {}),
+    ...(sheet.merged_ranges ? { merged_ranges: sheet.merged_ranges } : {}), ...(sheet.formulas ? { formulas: sheet.formulas } : {}),
+    ...(sheet.comments ? { comments: sheet.comments } : {}),
+  }));
+  const charts = list(workbook.charts, 20).map(chart => ({
+    sheet: clip(chart.sheet, 100), type: chart.type, title: clip(chart.title, 120),
+    series: list(chart.series, 6).map(series => ({ name: clip(series.name, 80), values: series.values_column || series.values_ref, categories: series.categories_column || series.categories_ref })),
+  }));
+  return {
+    sheets, charts,
+    excel_tables: list(workbook.excel_tables, 20).map(table => ({ name: clip(table.name, 80), sheet: clip(table.sheet, 100), ref: table.ref, totals_row: table.totals_row })),
+    defined_names: list(workbook.defined_names, 20).map(item => ({ name: clip(item.name, 80), ref: clip(item.ref, 120) })),
+    pivots: list(workbook.pivots, 20),
+    images: list(workbook.images, 12).map(image => ({ sheet: clip(image.sheet, 100), cell: image.cell, kind: image.kind, description: clip(image.description, 300), table_sheet: image.table_sheet })),
+    comments: list(workbook.comments, 15).map(item => ({ sheet: clip(item.sheet, 100), cell: item.cell, text: clip(item.text, 150) })),
+    text_boxes: list(workbook.text_boxes, 10).map(item => ({ sheet: clip(item.sheet, 100), text: clip(item.text, 200) })),
+    relationships: list(workbook.relationships, 40),
+    ...(workbook.has_macros ? { has_macros: true } : {}),
+  };
+}
 
 const clip = (value, limit) => String(value ?? '').slice(0, limit);
 
@@ -50,7 +78,7 @@ export function buildAiContext(dataset, analysis, objective = '') {
   const context = {
     objective: clip(objective, 1000),
     dataset: { filename: dataset.filename, rows_count: dataset.rows_count, columns_count: dataset.columns_count, sheet_count: dataset.sheets.length },
-    evidence: [], kpis: [], profiles: [],
+    evidence: [], kpis: [], profiles: [], workbook: null,
     coverage: { source: 'deterministic analysis of all uploaded rows', total_evidence: analysis.insights.length, total_profiles: analysis.profiles.length, context_limited: false },
   };
   function append(list, item) {
@@ -63,12 +91,24 @@ export function buildAiContext(dataset, analysis, objective = '') {
     append(context.evidence, { evidence_id: insight.id, title: clip(insight.title, 300), finding: clip(insight.description, 2000), evidence: insight.evidence });
   }
   for (const kpi of analysis.kpis.slice(0, 12)) append(context.kpis, kpi);
+  const sheets = new Map((dataset.sheets || []).map(sheet => [sheet.id, sheet]));
   for (const profile of analysis.profiles) {
-    const compact = { sheet_id: profile.sheet_id, sheet_name: clip(profile.sheet_name, 100), rows_count: profile.rows_count, duplicate_rows: profile.duplicate_rows, missing_count: profile.missing_count, missing_percentage: profile.missing_percentage, columns: [] };
+    const sheet = sheets.get(profile.sheet_id) || {};
+    const compact = {
+      sheet_id: profile.sheet_id, sheet_name: clip(profile.sheet_name, 100), rows_count: profile.rows_count, duplicate_rows: profile.duplicate_rows, missing_count: profile.missing_count, missing_percentage: profile.missing_percentage,
+      ...(sheet.source ? { source: sheet.source } : {}), ...(sheet.pivot ? { pivot: clip(sheet.pivot, 80) } : {}), ...(sheet.combined_from ? { combined_from: sheet.combined_from.length } : {}),
+      ...(sheet.area?.ref ? { range: sheet.area.ref } : {}), ...(sheet.title_lines?.length ? { title_lines: sheet.title_lines.slice(0, 3).map(line => clip(line, 150)) } : {}),
+      ...(sheet.footnotes?.length ? { footnotes: sheet.footnotes.slice(0, 5).map(line => clip(line, 200)) } : {}),
+      columns: [],
+    };
     if (!append(context.profiles, compact)) break;
+    const stored = new Map((sheet.columns || []).map(column => [column.key, column]));
     for (const column of profile.columns) {
+      const source = stored.get(column.key) || {};
       const item = {
         key: column.key, name: clip(column.name, 300), data_type: column.data_type,
+        ...(source.number_format ? { number_format: clip(source.number_format, 40) } : {}),
+        ...(source.formula ? { formula: clip(source.formula, 80) } : {}), ...(source.hidden ? { hidden: true } : {}),
         ...(column.role ? { role: column.role, semantic_type: column.semantic_type } : {}),
         ...(column.meaning ? { meaning: column.meaning } : {}),
         missing_count: column.missing_count, missing_percentage: column.missing_percentage, unique_count: column.unique_count,
@@ -78,6 +118,16 @@ export function buildAiContext(dataset, analysis, objective = '') {
         ...(column.top_values ? { top_values: column.top_values.slice(0, 5).map(entry => ({ value: clip(entry.value, 120), count: entry.count })) } : {}),
       };
       if (!append(compact.columns, item)) break;
+    }
+  }
+  const workbook = workbookContext(dataset.workbook);
+  if (workbook) {
+    context.workbook = workbook;
+    // The structure is useful but never worth dropping profiles for.
+    if (Buffer.byteLength(JSON.stringify(context)) > INPUT_LIMIT) {
+      context.workbook = { sheets: workbook.sheets.slice(0, 20), charts: workbook.charts.slice(0, 8), pivots: workbook.pivots.slice(0, 8), images: workbook.images.slice(0, 6) };
+      if (Buffer.byteLength(JSON.stringify(context)) > INPUT_LIMIT) context.workbook = null;
+      context.coverage.context_limited = true;
     }
   }
   return context;

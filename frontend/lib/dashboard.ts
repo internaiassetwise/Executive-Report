@@ -15,13 +15,18 @@ export type DashboardFilter =
   | { column: string; from?: string; to?: string }
   | { column: string; min?: number; max?: number };
 export type FilterOption = { values: { value: string; count: number }[]; total: number } | { min: string | number | null; max: string | number | null };
+/** Where a computed number comes from, so it can be checked against the file. */
+export interface ValueTrace {
+  sheet: string; table: string; agg: string | null; rows: number; excluded_summary_rows: number; filtered: boolean;
+  column?: string; range?: string; group_by?: string; combined_from?: string[]; from_image?: boolean;
+}
 export interface ChartResult {
   id: string; data: ChartPoint[]; grain?: string; groups_total?: number; others?: { label: string; y: number } | null;
-  points_total?: number; sampled?: boolean; error?: string;
+  points_total?: number; sampled?: boolean; error?: string; trace?: ValueTrace;
 }
 export interface DashboardResult {
   spec: DashboardSpec; filters: DashboardFilter[]; rows_total: number; rows_matched: number; summary_rows_excluded?: number;
-  kpis: { id: string; value: number | null }[]; charts: ChartResult[]; options?: Record<string, FilterOption>;
+  kpis: { id: string; value: number | null; trace?: ValueTrace }[]; charts: ChartResult[]; options?: Record<string, FilterOption>;
 }
 
 async function failure(response: Response): Promise<never> {

@@ -20,13 +20,13 @@ export function toGeminiSchema(schema) {
 
 export function createGeminiProvider({ apiKey, model, fetcher, LlmError }) {
   return {
-    async generateJson({ system, prompt, schema, maxOutputTokens = 4000, temperature = 0.2, signal }) {
+    async generateJson({ system, prompt, schema, images = [], maxOutputTokens = 4000, temperature = 0.2, signal }) {
       const thinkingConfig = thinkingFor(model);
       const response = await fetcher(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey }, signal,
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: system }] },
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          contents: [{ role: 'user', parts: [{ text: prompt }, ...images.map(image => ({ inlineData: { mimeType: image.mimeType, data: image.data } }))] }],
           generationConfig: { responseMimeType: 'application/json', responseSchema: toGeminiSchema(schema), temperature, maxOutputTokens, ...(thinkingConfig ? { thinkingConfig } : {}) },
         }),
       });

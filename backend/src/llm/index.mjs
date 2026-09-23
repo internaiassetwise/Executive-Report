@@ -3,8 +3,9 @@ import { createOpenAiCompatibleProvider } from './openai-compatible.mjs';
 
 /**
  * Provider-neutral structured generation. Business logic only calls
- * `generateJson({ system, prompt, schema, maxOutputTokens, signal })` and gets
- * `{ data, usage }` back; schemas are written in lower-case JSON Schema.
+ * `generateJson({ system, prompt, schema, images?, maxOutputTokens, signal })` and gets
+ * `{ data, usage }` back; schemas are written in lower-case JSON Schema. `images`
+ * ([{ mimeType, data: base64 }]) go to the model after the prompt text.
  *
  * Errors are LlmError with `kind`: unavailable | rate_limited | timeout | invalid_response | budget.
  */

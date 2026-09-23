@@ -17,10 +17,11 @@ function readCookie(request, name) {
 /**
  * Shared-password gate until company SSO exists. The cookie is a signed expiry,
  * so no session store is needed; changing the password revokes every cookie.
- * Without a password the gate is open in development and closed in production.
+ * Without a password the gate is open in development and closed in production,
+ * unless `open` (ACCESS_OPEN=true) deliberately opens it for everyone.
  */
-export function createAccessGate({ password = '', ttlHours = 12, production = false, now = Date.now } = {}) {
-  const required = Boolean(password) || production;
+export function createAccessGate({ password = '', ttlHours = 12, production = false, open = false, now = Date.now } = {}) {
+  const required = !open && (Boolean(password) || production);
   const key = password ? sha256(`asw-access-key:${password}`) : null;
   const expected = password ? sha256(password) : null;
   let failures = [];

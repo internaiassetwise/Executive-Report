@@ -29,6 +29,14 @@ test('production without a password refuses dataset requests', async () => {
   assert.equal((await handle(login('anything'))).status, 503);
 });
 
+test('ACCESS_OPEN opens production without a password, even when one is set', async () => {
+  for (const password of ['', 'secret']) {
+    const handle = createHandler({ ...base, access: createAccessGate({ password, production: true, open: true }) });
+    assert.deepEqual(await (await handle(withCookie('/api/access'))).json(), { required: false, authenticated: true });
+    assert.equal((await handle(withCookie('/api/datasets/config'))).status, 200);
+  }
+});
+
 test('a correct password issues a signed cookie that unlocks the API until it expires', async () => {
   let clock = 1_000_000;
   const access = createAccessGate({ password: 'correct horse', ttlHours: 1, production: true, now: () => clock });

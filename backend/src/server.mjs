@@ -78,8 +78,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const datasets = datasetConfigFromEnv();
   const allowedOrigins = (process.env.FRONTEND_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000').split(',').map(v => v.trim());
   const production = process.env.NODE_ENV === 'production';
-  const access = createAccessGate({ password: process.env.ACCESS_PASSWORD || '', ttlHours: Number(process.env.ACCESS_TTL_HOURS || 12), production });
-  if (production && !process.env.ACCESS_PASSWORD) console.warn('ACCESS_PASSWORD is not set: all dataset requests are refused.');
+  const open = process.env.ACCESS_OPEN === 'true';
+  const access = createAccessGate({ password: process.env.ACCESS_PASSWORD || '', ttlHours: Number(process.env.ACCESS_TTL_HOURS || 12), production, open });
+  if (open) console.warn('ACCESS_OPEN=true: no password is asked; anyone with the URL can upload files and use the AI budget.');
+  else if (production && !process.env.ACCESS_PASSWORD) console.warn('ACCESS_PASSWORD is not set: all dataset requests are refused.');
   const aiDailyLimit = Number(process.env.AI_DAILY_REQUEST_LIMIT || 200);
   if (!Number.isSafeInteger(aiDailyLimit) || aiDailyLimit < 0) throw new Error('Invalid AI_DAILY_REQUEST_LIMIT');
   const llmProvider = process.env.LLM_PROVIDER || 'gemini';

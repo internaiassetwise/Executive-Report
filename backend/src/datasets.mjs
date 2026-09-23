@@ -351,10 +351,11 @@ export function createDatasetService(options = {}) {
       advance(job, stage, 35 + Math.min(100, Math.max(0, event.progress)) * 0.35);
     }, config.timeoutMs, job.controller.signal), job.dataset);
     advance(job, 'ai', 75);
-    const ai = await analyzeWithAi(job.dataset, analysis, { llm: config.llm, apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, objective, timeoutMs: config.aiTimeoutMs, signal: job.controller.signal, fetcher: config.fetcher || fetch, budget: config.aiBudget });
+    // A BOQ comparison has its own fixed report; every other file gets a report written for its content.
+    const ai = await analyzeWithAi(job.dataset, analysis, { llm: config.llm, apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, objective, timeoutMs: config.aiTimeoutMs, signal: job.controller.signal, fetcher: config.fetcher || fetch, budget: config.aiBudget, report: !job.boq });
     if (!jobs.has(job.id)) return;
     advance(job, 'dashboard', 88);
-    const { dashboard: proposal, ...prose } = ai;
+    const { dashboard: proposal, report: written, ...prose } = ai;
     analysis.ai = prose;
     // The AI plan replaces the rule-based plan only after Python validates it
     // against the real column roles; otherwise the rule-based plan stays.
@@ -369,7 +370,11 @@ export function createDatasetService(options = {}) {
       }
     }
     advance(job, 'dashboard', 90);
-    if (analysis.ai.status === 'complete') {
+    if (written) {
+      // The report the model wrote for this file replaces the computed outline.
+      analysis.report = { source: 'ai', title: written.title, sections: written.sections.map((section, index) => ({ id: `ai_${index + 1}`, title: `${index + 1}. ${section.title}`, paragraphs: section.paragraphs, evidence_ids: section.evidence_ids })) };
+      analysis.ai.report = 'written';
+    } else if (analysis.ai.status === 'complete') {
       const executive = analysis.report.sections.find(section => section.id === 'executive_summary');
       if (executive && analysis.ai.summary) executive.paragraphs = [analysis.ai.summary, ...executive.paragraphs];
       const findings = analysis.report.sections.find(section => section.id === 'key_findings');

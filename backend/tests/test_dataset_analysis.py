@@ -36,7 +36,10 @@ class DatasetAnalysisTests(unittest.TestCase):
             self.assertIn(chart["y"], keys)
             self.assertNotIn("c0", [chart["x"], chart["y"]], "Sequential IDs must not become a business measure")
         evidence_ids = {item["id"] for item in result["insights"]}
-        self.assertEqual(len(result["report"]["sections"]), 10)
+        ids = [section["id"] for section in result["report"]["sections"]]
+        self.assertEqual(ids[:2], ["executive_summary", "dataset_overview"])
+        self.assertIn("trends", ids, "a file with dates gets a trend section")
+        self.assertTrue(all(section["title"].startswith(f"{index}. ") for index, section in enumerate(result["report"]["sections"], 1)))
         self.assertTrue(all(set(section["evidence_ids"]) <= evidence_ids for section in result["report"]["sections"]))
         json.dumps(result, allow_nan=False)
 
@@ -48,8 +51,9 @@ class DatasetAnalysisTests(unittest.TestCase):
         self.assertTrue(any(item["kind"] == "quality" for item in result["insights"]))
         self.assertTrue(any(item["kind"] == "segment" for item in result["insights"]))
         self.assertTrue(result["charts"])
-        trends = next(section for section in result["report"]["sections"] if section["id"] == "trends")
-        self.assertIn("Insufficient data", trends["paragraphs"][0])
+        ids = [section["id"] for section in result["report"]["sections"]]
+        self.assertNotIn("trends", ids, "no time column, no trend section")
+        self.assertIn("segments", ids)
         self.assertLessEqual(len(result["charts"]), 12)
         self.assertLessEqual(len(result["insights"]), 24)
         json.dumps(result, allow_nan=False)

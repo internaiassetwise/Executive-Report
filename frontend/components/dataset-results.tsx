@@ -100,7 +100,7 @@ export function DatasetResults({ id, dataset, analysis, boq, onAnalyze, retrying
         <button className="office-button primary" disabled={Boolean(exporting)} onClick={() => void download('pdf')}>{exporting === 'pdf' ? <LoaderCircle size={15} className="data-spin" /> : <Download size={15} />}ดาวน์โหลด PDF</button>
       </div></div>
       <article className="insight-report">
-        <header className="insight-report-header"><span>ASSETWISE</span><h2>รายงานการวิเคราะห์ข้อมูล</h2><p>{dataset.filename}</p><div><span>{num(dataset.rows_count)} แถว · {dataset.sheets.length} ชีต</span><span>{new Date(analysis.generated_at).toLocaleDateString('th-TH', { dateStyle: 'long' })}</span></div></header>
+        <header className="insight-report-header"><span>ASSETWISE</span><h2>{analysis.report.title || 'รายงานการวิเคราะห์ข้อมูล'}</h2><p>{dataset.filename}</p><div><span>{num(dataset.rows_count)} แถว · {dataset.sheets.length} ชีต</span><span>{new Date(analysis.generated_at).toLocaleDateString('th-TH', { dateStyle: 'long' })}</span></div></header>
         {analysis.report.sections.map((section, index) => <section key={section.id}><div className="insight-report-section-title"><span>{String(index + 1).padStart(2, '0')}</span><h3>{section.title}</h3></div>{section.paragraphs.map((paragraph, number) => <p key={number}>{paragraph}</p>)}</section>)}
         <footer>ตัวเลขทุกค่าคำนวณจากข้อมูลในไฟล์ที่อัปโหลด ข้อเสนอแนะควรพิจารณาร่วมกับบริบทของงานก่อนตัดสินใจ</footer>
       </article>

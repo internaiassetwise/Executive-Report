@@ -67,3 +67,26 @@ test('AI grounding permits rounded negative figures while rejecting a reversed s
   const rejected = await analyzeWithAi(dataset, negative, { apiKey: 'unit-test-key', fetcher: async () => response({ ...output, insights: [{ ...output.insights[0], description: 'ผลต่าง 12.3' }] }) });
   assert.deepEqual(rejected.insights, [], 'a reversed sign is dropped');
 });
+
+test('a report written for the file keeps only paragraphs whose numbers were computed', async () => {
+  let request;
+  const report = { title: 'รายงานการดำเนินงาน', sections: [
+    { title: 'ภาพรวม', paragraphs: ['ไฟล์นี้มีข้อมูล 4 แถว', 'ยอดขายเติบโต 35% จากปีก่อน'], evidence_ids: ['EV-001'] },
+    { title: 'ค่าเฉลี่ย', paragraphs: ['ค่าเฉลี่ยอยู่ที่ 12'], evidence_ids: ['EV-001', 'EV-999'] },
+    { title: 'คาดการณ์', paragraphs: ['ปีหน้าจะถึง 900'], evidence_ids: ['EV-001'] },
+  ] };
+  const llm = { name: 'fake', model: 'fake', async generateJson(input) { request = input; return { data: { ...valid, report }, usage: {} }; } };
+  const result = await analyzeWithAi(dataset, analysis, { llm, report: true });
+  assert.ok(request.schema.properties.report, 'the report is requested only when asked');
+  assert.deepEqual(result.report, { title: 'รายงานการดำเนินงาน', sections: [
+    { title: 'ภาพรวม', paragraphs: ['ไฟล์นี้มีข้อมูล 4 แถว'], evidence_ids: ['EV-001'] },
+    { title: 'ค่าเฉลี่ย', paragraphs: ['ค่าเฉลี่ยอยู่ที่ 12'], evidence_ids: ['EV-001'] },
+  ] });
+  const plain = await analyzeWithAi(dataset, analysis, { llm });
+  assert.equal(request.schema.properties.report, undefined);
+  assert.equal(plain.report, undefined);
+  // One usable section is not a report; the computed outline is used instead.
+  const thin = { title: 'x', sections: [report.sections[1]] };
+  const single = await analyzeWithAi(dataset, analysis, { llm: { ...llm, async generateJson() { return { data: { ...valid, report: thin }, usage: {} }; } }, report: true });
+  assert.equal(single.report, undefined);
+});

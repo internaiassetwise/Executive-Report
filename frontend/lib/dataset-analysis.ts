@@ -38,7 +38,8 @@ export interface DatasetAI {
 export interface DatasetAnalysis {
   generated_at: string; summary: string; kpis: DatasetKpi[]; insights: DatasetInsight[];
   profiles: SheetProfile[]; charts: DatasetChart[];
-  report: { sections: { id: string; title: string; paragraphs: string[]; evidence_ids: string[] }[] };
+  /** source 'ai': written by the model for this file (every number checked); otherwise the computed outline. */
+  report: { source?: 'ai'; title?: string; sections: { id: string; title: string; paragraphs: string[]; evidence_ids: string[] }[] };
   ai?: DatasetAI;
   dashboard?: DashboardSpec | null;
 }

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-TOTAL = re.compile(r"รวม|ยอด|มูลค่า|จำนวนเงิน|ส่วนต่าง|ประหยัด|กำไร|รายได้|ค่าใช้จ่าย|งบ|total|amount|revenue|sales|income|profit|expense|budget|spend|saving|difference|variance|value", re.I)
+TOTAL = re.compile(r"รวม|ยอด|มูลค่า|จำนวนเงิน|ส่วนต่าง|ประหยัด|กำไร|รายได้|ค่าใช้จ่าย|งบ|total|amount|\bamt\b|revenue|sales|income|profit|expense|budget|spend|saving|difference|variance|value", re.I)
 PRICE = re.compile(r"ราคา|ค่าของ|ค่าแรง|ต่อหน่วย|price|rate|cost|fee|salary", re.I)
 CURRENCY = re.compile(r"\(บาท\)|บาท|\bthb\b|\busd\b|฿|\$", re.I)
 QUANTITY = re.compile(r"\bqty\b|quantity|\bunits?\b|\bcount\b|orders?|จำนวน|ปริมาณ|ชิ้น", re.I)

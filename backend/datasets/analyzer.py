@@ -165,7 +165,8 @@ def likely_identifier(column, values, rows_count):
         return False
     unique = len(set(values))
     integers = all(float(value).is_integer() for value in values)
-    named = bool(re.search(r"(?:\bid\b|identifier|\bcode\b|\bsku\b|รหัส|เลขที่|ลำดับ)", column["name"], re.I))
+    # Codes stored as numbers (posting keys, account codes) are labels, not quantities.
+    named = bool(re.search(r"(?:\bid\b|identifier|\bcode\b|\bkey\b|\bsku\b|รหัส|เลขที่|ลำดับ)", column["name"], re.I))
     sequential = len(values) >= 5 and integers and unique == len(values) and max(values) - min(values) == len(values) - 1
     return named or sequential
 
@@ -367,27 +368,30 @@ def report_sections(analysis, dataset):
     if trends:
         recommendations.append("ตรวจความสม่ำเสมอของช่วงเวลาและจำนวนแถวในแต่ละช่วง ก่อนอธิบายสาเหตุของการเปลี่ยนแปลงหรือคาดการณ์ช่วงถัดไป")
     recommendations.append("ยืนยันความหมายและหน่วยของคอลัมน์กับเจ้าของข้อมูล รายงานนี้ไม่อนุมานบริบทธุรกิจหรือรวมตัวชี้วัดต่างชีตเข้าด้วยกัน")
-    return [
-        section("executive_summary", "1. บทสรุปผู้บริหาร", [analysis["summary"], *[item["description"] for item in insights[1:4]]], insights[:4]),
-        section("dataset_overview", "2. ภาพรวมชุดข้อมูล", [f"ไฟล์ {dataset['filename']} · วิเคราะห์แยกแต่ละชีต ไม่มีการ join ข้ามตาราง", *[f"ชีต {profile['sheet_name']}: {profile['rows_count']:,} แถว {len(profile['columns']):,} คอลัมน์" for profile in analysis["profiles"]]]),
-        section("key_kpis", "3. ตัวชี้วัดสำคัญ", [f"{kpi['name']}: {kpi['formatted_value']} — {kpi['method']}" for kpi in analysis["kpis"]]),
-        section("key_findings", "4. ข้อค้นพบสำคัญ", [item["description"] for item in insights], insights),
-        section("trends", "5. แนวโน้มตามเวลา", [item["description"] for item in trends], trends),
-        section("segments", "6. กลุ่มข้อมูลสำคัญ", [item["description"] for item in segments], segments),
-        section("anomalies_risks", "7. ค่าผิดปกติและความเสี่ยง", [item["description"] for item in anomalies] or ["ไม่พบค่าที่เข้าเกณฑ์ IQR ในตัวชี้วัดที่เลือก หรือข้อมูลไม่เพียงพอสำหรับการตรวจ; ไม่ได้หมายความว่าไม่มีความเสี่ยงทางธุรกิจ", INSUFFICIENT], anomalies),
-        section("data_quality", "8. คุณภาพข้อมูล", [f"ชีต {profile['sheet_name']}: ค่าว่าง {profile['missing_count']:,} เซลล์ ({fmt(profile['missing_percentage'])}%), แถวซ้ำ {profile['duplicate_rows']:,} แถว" for profile in analysis["profiles"]] + [warning for profile in analysis["profiles"] for warning in profile["warnings"]], quality),
-        section("recommendations", "9. ข้อเสนอแนะ", recommendations, [*quality, *anomalies, *trends]),
-        section("methodology", "10. ภาคผนวกและวิธีวิเคราะห์", [
-            "อ่านข้อมูลทั้งหมดที่ผ่านขีดจำกัดไฟล์จาก SQLite; ค่าว่างไม่รวมในสถิติของคอลัมน์นั้น แถวซ้ำยังคงรวมในการคำนวณ",
-            "ค่าเฉลี่ย มัธยฐาน ค่าต่ำสุด/สูงสุด ผลรวม และส่วนเบี่ยงเบนมาตรฐานคำนวณจากค่าตัวเลขจริงทั้งหมด; ส่วนเบี่ยงเบนมาตรฐานใช้ n−1 (ค่าเดียวแสดง 0)",
-            "ผลรวมในตารางสถิติเป็นการบวกค่าทางคณิตศาสตร์ ไม่ยืนยันว่าหน่วยของคอลัมน์เหมาะสำหรับบวกรวม จึงเลือก KPI เป็นค่าเฉลี่ยหรือจำนวนค่าที่แตกต่างกัน",
-            "IQR ใช้ Q1/Q3 แบบ linear interpolation และเกณฑ์ 1.5 × IQR; Pearson ใช้แถวที่มีค่าครบคู่ของตัวชี้วัดไม่คงที่สูงสุด 6 คอลัมน์แรกต่อชีต ไม่สรุปเหตุและผล",
-            "กราฟแนวโน้มใช้ค่าเฉลี่ยตามช่วงเวลา UTC และไม่เติมช่วงเวลาที่ไม่มีข้อมูล; กราฟ scatter ใช้จุดตัวอย่างตามลำดับแถวสูงสุด 200 จุด โดยค่าความสัมพันธ์ยังคำนวณจากทุกคู่",
-            "เลือกกราฟและข้อค้นพบแบบหมุนเวียนระหว่างชีตและประเภทข้อมูล สูงสุด 12 กราฟและ 24 ข้อค้นพบ; รายละเอียดสถิติทุกชีตยังอยู่ในโปรไฟล์",
-            "ชื่อหมวดหมู่ที่ยาวอาจย่อในโปรไฟล์/กราฟเพื่อการแสดงผลเท่านั้น การจัดกลุ่มและนับค่าที่แตกต่างใช้ข้อความเต็ม; ไม่มีการส่งข้อมูลดิบทั้งชุดให้ LLM",
-            "สูตร Excel ถูกเก็บเป็นข้อความ ไม่มีการประมวลผลสูตรใหม่; ข้อเสนอแนะทางธุรกิจที่ต้องอาศัยข้อมูลภายนอกถือว่ายังมีข้อมูลไม่เพียงพอ",
-        ]),
+    # A general file gets only the sections its data can fill: no time column means
+    # no trend section, nothing unusual means no anomaly section.
+    other = [item for item in insights if item["kind"] not in ("quality", "trend", "segment", "anomaly")]
+    planned = [
+        ("executive_summary", "บทสรุปผู้บริหาร", [analysis["summary"], *[item["description"] for item in insights[1:4]]], insights[:4], True),
+        ("dataset_overview", "ภาพรวมชุดข้อมูล", [f"ไฟล์ {dataset['filename']}", *[f"ชีต {profile['sheet_name']}: {profile['rows_count']:,} แถว {len(profile['columns']):,} คอลัมน์" for profile in analysis["profiles"]]], (), True),
+        ("key_kpis", "ตัวชี้วัดสำคัญ", [f"{kpi['name']}: {kpi['formatted_value']} — {kpi['method']}" for kpi in analysis["kpis"]], (), False),
+        ("key_findings", "ข้อค้นพบสำคัญ", [item["description"] for item in other], other, False),
+        ("trends", "แนวโน้มตามเวลา", [item["description"] for item in trends], trends, False),
+        ("segments", "กลุ่มข้อมูลสำคัญ", [item["description"] for item in segments], segments, False),
+        ("anomalies_risks", "ค่าที่ควรตรวจสอบ", [item["description"] for item in anomalies], anomalies, False),
+        ("data_quality", "คุณภาพข้อมูล", [f"ชีต {profile['sheet_name']}: ค่าว่าง {profile['missing_count']:,} เซลล์ ({fmt(profile['missing_percentage'])}%), แถวซ้ำ {profile['duplicate_rows']:,} แถว" for profile in analysis["profiles"]] + [warning for profile in analysis["profiles"] for warning in profile["warnings"]], quality, True),
+        ("recommendations", "ข้อเสนอแนะ", recommendations, [*quality, *anomalies, *trends], True),
+        ("methodology", "วิธีคำนวณ", [
+            "ตัวเลขทุกค่าคำนวณจากทุกแถวในไฟล์ ค่าว่างไม่นับรวมในสถิติของคอลัมน์นั้น และแถวสรุปยอด (เช่น รวม, VAT) ไม่นับซ้ำ",
+            "ค่าที่ควรตรวจสอบคือค่าที่อยู่ห่างจากค่าส่วนใหญ่มากผิดปกติ เป็นจุดให้ตรวจ ไม่ได้แปลว่าข้อมูลผิด",
+            "ความสัมพันธ์ระหว่างตัวเลขสองคอลัมน์บอกว่าเปลี่ยนไปด้วยกัน ไม่ได้บอกว่าอะไรเป็นสาเหตุ",
+        ], (), True),
     ]
+    sections = []
+    for identifier, title, paragraphs, matches, always in planned:
+        if always or paragraphs:
+            sections.append(section(identifier, f"{len(sections) + 1}. {title}", paragraphs, matches))
+    return sections
 
 
 def analyze(sqlite_path, progress=None):

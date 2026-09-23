@@ -8,14 +8,22 @@ const CHART_AGGS = ['count', 'sum', 'avg', 'min', 'max'];
 const GRAINS = ['auto', 'day', 'week', 'month', 'quarter', 'year'];
 
 /** One structured response: grounded prose plus a dashboard *plan*; the application computes every number. */
-function responseSchema(context) {
+function responseSchema(context, { report = false } = {}) {
   const sheets = context.profiles.map(profile => profile.sheet_id);
   const keys = [...new Set(context.profiles.flatMap(profile => profile.columns.map(column => column.key)))];
   const column = keys.length ? { type: 'string', enum: keys } : { type: 'string' };
   const optional = keys.length ? { type: 'string', enum: [...keys, 'none'] } : { type: 'string' };
   const cited = { type: 'array', minItems: 1, maxItems: 6, items: { type: 'string' } };
+  // Nested maxItems multiply schema states (Gemini rejects large ones); sizes are clipped on validation.
+  const reportSchema = { type: 'object', required: ['title', 'sections'], properties: {
+    title: { type: 'string' },
+    sections: { type: 'array', items: { type: 'object', required: ['title', 'paragraphs', 'evidence_ids'], properties: {
+      title: { type: 'string' }, paragraphs: { type: 'array', items: { type: 'string' } }, evidence_ids: { type: 'array', items: { type: 'string' } },
+    } } },
+  } };
   return {
-    type: 'object', required: ['summary', 'insights', 'recommendations', 'dashboard'], properties: {
+    type: 'object', required: ['summary', 'insights', 'recommendations', 'dashboard', ...(report ? ['report'] : [])], properties: {
+      ...(report ? { report: reportSchema } : {}),
       summary: { type: 'string' },
       insights: { type: 'array', maxItems: 12, items: { type: 'object', required: ['title', 'description', 'evidence_ids'], properties: { title: { type: 'string' }, description: { type: 'string' }, evidence_ids: cited } } },
       recommendations: { type: 'array', maxItems: 8, items: { type: 'object', required: ['text', 'evidence_ids'], properties: { text: { type: 'string' }, evidence_ids: cited } } },
@@ -43,6 +51,16 @@ const SYSTEM = [
   'The workbook section describes the file itself: charts its author made (reuse their intent when the columns fit), pivot tables (summaries of another sheet), hidden sheets/columns (helpers: avoid them), Excel tables, notes and footnotes (context such as units or VAT; you may mention them as stated), and pictures read by vision. Sheets with source image_ocr were read from a picture: use them only when no cell-based sheet covers the same data. Pivot sheets repeat their source: prefer the source sheet for totals.',
   'Do not output data rows, markdown or fields beyond the JSON schema.',
 ].join('\n');
+
+// Only for general files (construction cost files have their own fixed report).
+const REPORT_PART = [
+  'PART 3 - report. Write the report for THIS file in Thai, shaped by what the file is about (for example a complaints log, a customer list, an accounting journal, an event registration). There is no template: choose 3-7 section titles that fit this content and its readers, and skip anything the evidence cannot support. Do not add sections about time trends, anomalies or data quality unless the evidence shows something worth telling.',
+  'Each section: 1-4 short paragraphs of plain business Thai for executives, and the evidence_ids it relies on. The same number rule as PART 1 applies to every paragraph: only numbers stated in the cited evidence, the KPIs or the dataset counts. Never use statistics jargon (IQR, Pearson, standard deviation); say what it means instead. Report title: short, names what the file is about.',
+].join(' ');
+
+function systemPrompt({ report = false } = {}) {
+  return report ? `${SYSTEM}${String.fromCharCode(10)}${REPORT_PART}` : SYSTEM;
+}
 
 /** The structural part of the dataset IR, trimmed for the prompt. */
 function workbookContext(workbook) {
@@ -174,16 +192,42 @@ export function validateAiResult(output, analysis, dataset, context = buildAiCon
   const recommendations = output.recommendations.slice(0, 8).filter(item => item && text(item.text, 1, 1200) && references(item.evidence_ids)
     && signedGrounded(item.text, cited(item.evidence_ids)));
   const summary = text(output.summary, 1, 2500) && signedGrounded(output.summary, overview) ? output.summary.trim() : '';
+  const report = validReport(output.report, ids, cited, overview, text);
   const dropped = { summary: !summary && Boolean(output.summary), insights: output.insights.length - insights.length, recommendations: output.recommendations.length - recommendations.length };
   // Counts only: never the statements themselves.
   if (dropped.summary || dropped.insights || dropped.recommendations) console.warn(JSON.stringify({ event: 'ai_statements_dropped', ...dropped }));
   if (!summary && !insights.length && !recommendations.length) throw new Error('No grounded AI statements');
   // Copy only schema-approved fields; the provider cannot replace computed data.
   return {
+    ...(report ? { report } : {}),
     summary,
     insights: insights.map(item => ({ title: item.title.trim(), description: item.description.trim(), evidence_ids: [...new Set(item.evidence_ids)] })),
     recommendations: recommendations.map(item => ({ text: item.text.trim(), evidence_ids: [...new Set(item.evidence_ids)] })),
   };
+}
+
+/**
+ * A free-form report is kept paragraph by paragraph: each must pass the same
+ * number check as the prose, against the section's evidence plus dataset counts
+ * and KPIs. Fewer than two usable sections means the computed report is used.
+ */
+function validReport(report, ids, cited, overview, text) {
+  if (!report || typeof report !== 'object' || !Array.isArray(report.sections)) return null;
+  let dropped = 0;
+  const sections = [];
+  for (const section of report.sections.slice(0, 8)) {
+    if (!section || !text(section.title, 1, 120) || !Array.isArray(section.paragraphs)) continue;
+    const evidence = Array.isArray(section.evidence_ids) ? [...new Set(section.evidence_ids.filter(id => ids.has(id)))].slice(0, 12) : [];
+    const paragraphs = section.paragraphs.slice(0, 6).filter(paragraph => {
+      const ok = text(paragraph, 1, 2000) && signedGrounded(paragraph, [...cited(evidence), ...overview]);
+      if (!ok) dropped++;
+      return ok;
+    }).map(paragraph => paragraph.trim());
+    if (paragraphs.length) sections.push({ title: section.title.trim(), paragraphs, evidence_ids: evidence });
+  }
+  if (dropped) console.warn(JSON.stringify({ event: 'ai_report_paragraphs_dropped', count: dropped }));
+  if (sections.length < 2) return null;
+  return { title: text(report.title, 1, 160) ? report.title.trim() : '', sections };
 }
 
 /** Map sentinel values to the application's spec shape; Python validates everything else. */
@@ -212,20 +256,22 @@ const MESSAGES = {
  * One provider request per analysis. Returns grounded prose (or an error status)
  * and, separately, `dashboard`: an unvalidated plan for Python to check.
  */
-export async function analyzeWithAi(dataset, analysis, { llm, apiKey, model = DEFAULT_DATASET_MODEL, objective = '', signal, timeoutMs = 45_000, fetcher = fetch, budget } = {}) {
+export async function analyzeWithAi(dataset, analysis, { llm, apiKey, model = DEFAULT_DATASET_MODEL, objective = '', signal, timeoutMs = 45_000, fetcher = fetch, budget, report = false } = {}) {
   llm ??= createLlm({ provider: 'gemini', apiKey, model: model || DEFAULT_DATASET_MODEL, fetcher, budget, timeoutMs });
   const base = { model: llm?.model || model || DEFAULT_DATASET_MODEL, summary: '', insights: [], recommendations: [] };
   if (!llm) return { ...base, status: 'unavailable', message: 'ยังไม่ได้เปิดระบบสรุปข้อความ ตัวเลขและกราฟใช้งานได้ตามปกติ' };
   const context = buildAiContext(dataset, analysis, objective);
   let output;
   try {
-    ({ data: output } = await llm.generateJson({ system: SYSTEM, prompt: JSON.stringify(context), schema: responseSchema(context), maxOutputTokens: 6000, signal }));
+    ({ data: output } = await llm.generateJson({ system: systemPrompt({ report }), prompt: JSON.stringify(context), schema: responseSchema(context, { report }), maxOutputTokens: report ? 12000 : 6000, signal }));
   } catch (error) {
     if (signal?.aborted) throw signal.reason || error;
     const kind = error instanceof LlmError ? error.kind : 'unavailable';
     return { ...base, status: kind === 'budget' ? 'unavailable' : 'error', message: MESSAGES[kind] || MESSAGES.unavailable };
   }
   const dashboard = dashboardProposal(output);
+  // A report is taken only when one was asked for (a BOQ file has its own).
+  if (!report && output && typeof output === 'object') delete output.report;
   try {
     const result = validateAiResult(output, analysis, dataset, context);
     return { ...base, ...result, dashboard, status: 'complete', message: 'สรุปจากสถิติและหลักฐานที่คำนวณไว้' };

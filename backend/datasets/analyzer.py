@@ -372,14 +372,15 @@ def report_sections(analysis, dataset):
     # no trend section, nothing unusual means no anomaly section.
     other = [item for item in insights if item["kind"] not in ("quality", "trend", "segment", "anomaly")]
     planned = [
-        ("executive_summary", "บทสรุปผู้บริหาร", [analysis["summary"], *[item["description"] for item in insights[1:4]]], insights[:4], True),
+        # Findings have their own sections below; the summary does not repeat them.
+        ("executive_summary", "บทสรุปผู้บริหาร", [analysis["summary"]], insights[:1], True),
         ("dataset_overview", "ภาพรวมชุดข้อมูล", [f"ไฟล์ {dataset['filename']}", *[f"ชีต {profile['sheet_name']}: {profile['rows_count']:,} แถว {len(profile['columns']):,} คอลัมน์" for profile in analysis["profiles"]]], (), True),
         ("key_kpis", "ตัวชี้วัดสำคัญ", [f"{kpi['name']}: {kpi['formatted_value']} — {kpi['method']}" for kpi in analysis["kpis"]], (), False),
         ("key_findings", "ข้อค้นพบสำคัญ", [item["description"] for item in other], other, False),
         ("trends", "แนวโน้มตามเวลา", [item["description"] for item in trends], trends, False),
         ("segments", "กลุ่มข้อมูลสำคัญ", [item["description"] for item in segments], segments, False),
         ("anomalies_risks", "ค่าที่ควรตรวจสอบ", [item["description"] for item in anomalies], anomalies, False),
-        ("data_quality", "คุณภาพข้อมูล", [f"ชีต {profile['sheet_name']}: ค่าว่าง {profile['missing_count']:,} เซลล์ ({fmt(profile['missing_percentage'])}%), แถวซ้ำ {profile['duplicate_rows']:,} แถว" for profile in analysis["profiles"]] + [warning for profile in analysis["profiles"] for warning in profile["warnings"]], quality, True),
+        ("data_quality", "คุณภาพข้อมูล", [f"ชีต {profile['sheet_name']}: ค่าว่าง {profile['missing_count']:,} เซลล์ ({fmt(profile['missing_percentage'])}%), แถวซ้ำ {profile['duplicate_rows']:,} แถว" for profile in analysis["profiles"]], quality, True),
         ("recommendations", "ข้อเสนอแนะ", recommendations, [*quality, *anomalies, *trends], True),
         ("methodology", "วิธีคำนวณ", [
             "ตัวเลขทุกค่าคำนวณจากทุกแถวในไฟล์ ค่าว่างไม่นับรวมในสถิติของคอลัมน์นั้น และแถวสรุปยอด (เช่น รวม, VAT) ไม่นับซ้ำ",

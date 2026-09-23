@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createHandler } from './app.mjs';
 import { datasetConfigFromEnv, MULTIPART_OVERHEAD } from './datasets.mjs';
 import { DEFAULT_DATASET_MODEL } from './dataset-ai.mjs';
+import { createAccessGate } from './access.mjs';
 
 export function createApiServer(handler, { port = 8000, maxFileSize = 25 * 1024 * 1024, maxConcurrentUploads = 2, allowedOrigins } = {}) {
   let activeUploads = 0;
@@ -29,6 +30,10 @@ export function createApiServer(handler, { port = 8000, maxFileSize = 25 * 1024 
       if (datasetUpload) {
         if (allowedOrigins && !allowedOrigins.includes(incoming.headers.origin)) {
           rejectBody(403, { code: 'ORIGIN_NOT_ALLOWED', message: 'Origin not allowed' }); return;
+        }
+        // Reject before buffering up to maxFileSize bytes from an unauthenticated client.
+        if (handler.allowed && !handler.allowed({ headers: { get: name => incoming.headers[name] ?? null } })) {
+          rejectBody(401, { code: 'ACCESS_REQUIRED', message: 'กรุณาใส่รหัสผ่านเพื่อเข้าใช้งาน' }); return;
         }
         if (activeUploads >= maxConcurrentUploads) {
           rejectBody(429, { code: 'BUSY', message: 'มีไฟล์กำลังอัปโหลดอยู่ กรุณาลองอีกครั้งในอีกสักครู่' }); return;
@@ -70,7 +75,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
   const datasets = datasetConfigFromEnv();
   const allowedOrigins = (process.env.FRONTEND_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000').split(',').map(v => v.trim());
-  const handler = createHandler({ apiKey: process.env.GEMINI_API_KEY || '', model: process.env.GEMINI_MODEL || DEFAULT_DATASET_MODEL, allowedOrigins, datasets });
+  const production = process.env.NODE_ENV === 'production';
+  const access = createAccessGate({ password: process.env.ACCESS_PASSWORD || '', ttlHours: Number(process.env.ACCESS_TTL_HOURS || 12), production });
+  if (production && !process.env.ACCESS_PASSWORD) console.warn('ACCESS_PASSWORD is not set: all dataset requests are refused.');
+  const aiDailyLimit = Number(process.env.AI_DAILY_REQUEST_LIMIT || 200);
+  if (!Number.isSafeInteger(aiDailyLimit) || aiDailyLimit < 0) throw new Error('Invalid AI_DAILY_REQUEST_LIMIT');
+  const handler = createHandler({ apiKey: process.env.GEMINI_API_KEY || '', model: process.env.GEMINI_MODEL || DEFAULT_DATASET_MODEL, allowedOrigins, datasets, access, aiDailyLimit, legacyAi: process.env.LEGACY_AI_ENDPOINTS === 'true' });
   const server = createApiServer(handler, { port, maxFileSize: datasets.maxFileSize, maxConcurrentUploads: datasets.maxConcurrent, allowedOrigins });
   server.listen(port, '0.0.0.0', () => console.log(`Backend ready on 0.0.0.0:${port}`));
   server.on('error', error => { console.error(`Backend could not listen (${error.code || 'unknown'}).`); process.exitCode = 1; });

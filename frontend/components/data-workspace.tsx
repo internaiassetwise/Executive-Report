@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { ArrowRight, Check, ChevronRight, FileSpreadsheet, Info, LoaderCircle, Plus, ShieldCheck, Upload, X } from 'lucide-react';
+import { AccessGate } from '@/components/access-gate';
 import { DatasetResults } from '@/components/dataset-results';
-import { analyzeDataset, DatasetError, getDatasetConfig, getDatasetJob, removeDataset, uploadDataset, type DatasetConfig, type DatasetJob } from '@/lib/datasets';
+import { ACCESS_REQUIRED_EVENT, analyzeDataset, DatasetError, getDatasetConfig, getDatasetJob, removeDataset, uploadDataset, type DatasetConfig, type DatasetJob } from '@/lib/datasets';
 
 const SESSION_KEY = 'ai-data-analyst:dataset';
 const processingSteps = [
@@ -55,6 +56,7 @@ export function DataWorkspace() {
   const [pollRetry, setPollRetry] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [locked, setLocked] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const pendingUpload = useRef<Promise<DatasetJob> | null>(null);
   const activeId = useRef<string | null>(null);
@@ -66,6 +68,18 @@ export function DataWorkspace() {
   const loadConfig = useCallback((signal?: AbortSignal) =>
     getDatasetConfig(signal).then(value => { if (!signal?.aborted) setConfig(value); })
       .catch(reason => { if (!signal?.aborted) setConfigError(message(reason)); }), []);
+
+  useEffect(() => {
+    const lock = () => setLocked(true);
+    window.addEventListener(ACCESS_REQUIRED_EVENT, lock);
+    return () => window.removeEventListener(ACCESS_REQUIRED_EVENT, lock);
+  }, []);
+
+  function unlocked() {
+    setLocked(false); setConfigError(''); setError('');
+    void loadConfig();
+    if (activeId.current) void getDatasetJob(activeId.current).then(setJob).catch(() => { remember(null); activeId.current = null; });
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -194,9 +208,9 @@ export function DataWorkspace() {
         })}
       </ol>
 
-      {(error || jobError) && <div className="data-error" role="alert"><Info size={20} /><div><strong>{jobError ? (job?.dataset ? 'วิเคราะห์ไม่สำเร็จ' : 'อ่านไฟล์ไม่สำเร็จ') : 'ยังดำเนินการไม่ได้'}</strong><p>{error || jobError}</p><div className="data-error-actions">{(file || job?.dataset) && <button className="data-button secondary compact" disabled={processing || deleting || retrying} onClick={() => { if (job?.dataset) void reanalyze(''); else void start(); }}>ลองอีกครั้ง</button>}{jobError && <button className="data-text-button" disabled={deleting} onClick={() => void clearDataset()}>เลือกไฟล์อื่น</button>}</div></div></div>}
+      {!locked && (error || jobError) && <div className="data-error" role="alert"><Info size={20} /><div><strong>{jobError ? (job?.dataset ? 'วิเคราะห์ไม่สำเร็จ' : 'อ่านไฟล์ไม่สำเร็จ') : 'ยังดำเนินการไม่ได้'}</strong><p>{error || jobError}</p><div className="data-error-actions">{(file || job?.dataset) && <button className="data-button secondary compact" disabled={processing || deleting || retrying} onClick={() => { if (job?.dataset) void reanalyze(''); else void start(); }}>ลองอีกครั้ง</button>}{jobError && <button className="data-text-button" disabled={deleting} onClick={() => void clearDataset()}>เลือกไฟล์อื่น</button>}</div></div></div>}
 
-      {restoring ? <output className="data-loading"><LoaderCircle size={24} className="data-spin" />กำลังเปิดชุดข้อมูล…</output> : processing ?
+      {locked ? <AccessGate onUnlocked={unlocked} /> : restoring ? <output className="data-loading"><LoaderCircle size={24} className="data-spin" />กำลังเปิดชุดข้อมูล…</output> : processing ?
         <section className="data-processing" aria-label="สถานะการประมวลผล">
           <div className="data-processing-heading">
             <span className="data-process-icon"><LoaderCircle size={28} className="data-spin" /></span>

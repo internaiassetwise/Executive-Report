@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createHandler } from '../src/app.mjs';
 
-const config = { apiKey: 'test-only-key', model: 'test-model', allowedOrigins: ['http://localhost:3000', 'http://127.0.0.1:3000'] };
+const config = { legacyAi: true, apiKey: 'test-only-key', model: 'test-model', allowedOrigins: ['http://localhost:3000', 'http://127.0.0.1:3000'] };
 const payload = { objective: 'ตรวจแนวโน้ม', evidence: [{ evidence_id: 'EV-001', finding: 'ค่าเฉลี่ย 12 จากข้อมูล 20 แถว', method: 'Python mean' }] };
 const request = (body, origin = 'http://localhost:3000') => new Request('http://127.0.0.1:8000/api/interpret', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: typeof body === 'string' ? body : JSON.stringify(body) });
 const result = insights => Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify({ insights }) }] } }] });

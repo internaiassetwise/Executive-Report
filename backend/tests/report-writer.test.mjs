@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHandler} from '../src/app.mjs';
-const config={apiKey:'test-secret',model:'gemini-2.5-flash',allowedOrigins:['http://localhost:3000']};
+const config={legacyAi:true,apiKey:'test-secret',model:'gemini-2.5-flash',allowedOrigins:['http://localhost:3000']};
 const payload={objective:'ทดสอบ',slots:[{id:'S0',purpose:'สรุป',context:'ค่าเฉลี่ย 10 บาท'}]};
 const request=(body=payload)=>new Request('http://localhost/api/report',{method:'POST',headers:{Origin:'http://localhost:3000'},body:JSON.stringify(body)});
 const output={slots:[{id:'S0',paragraphs:['ค่าเฉลี่ย 10 บาท ควรตรวจสอบข้อมูลประกอบ'],evidence_ids:['S0']}]};

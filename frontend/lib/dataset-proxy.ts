@@ -9,7 +9,8 @@ export async function datasetProxy(request: Request) {
   }
   try {
     const headers = new Headers();
-    for (const name of ['content-type', 'origin']) {
+    // The access cookie is verified by the backend; forward it but never read it here.
+    for (const name of ['content-type', 'origin', 'cookie']) {
       const value = request.headers.get(name);
       if (value) headers.set(name, value);
     }
@@ -23,6 +24,7 @@ export async function datasetProxy(request: Request) {
       headers: {
         'Content-Type': response.headers.get('Content-Type') || 'application/json; charset=utf-8',
         ...(response.headers.has('Content-Disposition') ? { 'Content-Disposition': response.headers.get('Content-Disposition')! } : {}),
+        ...(response.headers.has('Set-Cookie') ? { 'Set-Cookie': response.headers.get('Set-Cookie')! } : {}),
         'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
       },
     });

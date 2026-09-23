@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHandler} from '../src/app.mjs';
-const config={apiKey:'fake',model:'gemini-2.5-flash',allowedOrigins:['http://localhost:3000']};
+const config={legacyAi:true,apiKey:'fake',model:'gemini-2.5-flash',allowedOrigins:['http://localhost:3000']};
 const input={objective:'test',tables:[{id:'T1',opportunities:[{id:'a'}]}]};
 const plan={title:'แนวโน้มยอดขาย',understanding:'ข้อมูลตัวอย่าง',limitations:[],sections:[{title:'แนวโน้ม',question:'มีแนวโน้มอย่างไร',analyses:[{table_id:'T1',analysis_id:'a'}]}]};
 const request=(body=input,origin='http://localhost:3000')=>new Request('http://localhost/api/plan',{method:'POST',headers:{Origin:origin},body:JSON.stringify(body)});

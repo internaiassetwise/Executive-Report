@@ -70,3 +70,4 @@ progress.data-progress::-moz-progress-bar{background:var(--data-accent);border-r
 .data-stage-list li.done .data-stage-text strong{color:#24364b}
 .data-stage-list li.pending .data-stage-text strong{color:#8b99a8}
 .data-preview-limit{padding:12px 18px;background:#fffaf0;color:#85714b;font-size:11px;border-bottom:1px solid #e9dfc5}
+.access-gate{max-width:420px;margin:24px auto;text-align:left}.access-gate h2{font-size:19px;font-weight:500;margin:4px 0 6px}.access-gate form{display:flex;flex-direction:column;gap:10px;margin-top:22px}.access-gate label{font-size:12px;color:#455771}.access-gate input{min-height:44px;border:1px solid #dfe6ee;border-radius:6px;padding:10px 12px;font-size:14px;background:#fff;color:#192d47}.access-gate input:focus-visible{outline:2px solid var(--data-accent);outline-offset:1px}.access-error{color:#b42318;font-size:12px}.access-gate .data-button{margin-top:6px}

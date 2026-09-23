@@ -100,9 +100,10 @@ export function validateAiResult(output, analysis, dataset) {
   };
 }
 
-export async function analyzeWithAi(dataset, analysis, { apiKey, model = DEFAULT_DATASET_MODEL, objective = '', signal, timeoutMs = 45_000, fetcher = fetch } = {}) {
+export async function analyzeWithAi(dataset, analysis, { apiKey, model = DEFAULT_DATASET_MODEL, objective = '', signal, timeoutMs = 45_000, fetcher = fetch, budget } = {}) {
   const base = { model: model || DEFAULT_DATASET_MODEL, summary: '', insights: [], recommendations: [] };
   if (!apiKey) return { ...base, status: 'unavailable', message: 'ยังไม่ได้ตั้งค่า Gemini API key ผลสถิติ กราฟ และรายงานจากข้อมูลจริงพร้อมใช้งานแล้ว' };
+  if (budget && !budget.reserve()) return { ...base, status: 'unavailable', message: 'ใช้ AI ครบโควตาของวันนี้แล้ว ผลสถิติ กราฟ และรายงานจากข้อมูลจริงยังใช้งานได้ตามปกติ' };
   const abort = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(timeoutMs)]);
   try {
     const context = buildAiContext(dataset, analysis, objective);
@@ -116,6 +117,7 @@ export async function analyzeWithAi(dataset, analysis, { apiKey, model = DEFAULT
     });
     if (!response.ok) return { ...base, status: 'error', message: response.status === 429 ? 'Gemini มีคำขอมากเกินไปหรือโควตาไม่เพียงพอ ลองวิเคราะห์ AI อีกครั้งได้ ผลคำนวณเดิมยังใช้งานได้' : 'Gemini ยังไม่พร้อมใช้งาน กรุณาตรวจ API key และ model แล้วลองอีกครั้ง ผลคำนวณเดิมยังใช้งานได้' };
     const provider = await response.json();
+    budget?.record(base.model, provider.usageMetadata);
     const raw = provider.candidates?.[0]?.content?.parts?.filter(part => typeof part.text === 'string' && !part.thought).map(part => part.text).join('');
     if (!raw || Buffer.byteLength(raw) > 80_000) throw new Error('Invalid AI response');
     const result = validateAiResult(JSON.parse(raw), analysis, dataset);

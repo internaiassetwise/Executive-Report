@@ -47,8 +47,13 @@ export class DatasetError extends Error {
   constructor(message: string, public readonly status: number) { super(message); }
 }
 
+/** Fired when the backend rejects a request for a missing or expired access cookie. */
+export const ACCESS_REQUIRED_EVENT = 'asw:access-required';
+export interface AccessState { required: boolean; authenticated: boolean }
+
 async function readJson<T>(response: Response): Promise<T> {
   const data = await response.json().catch(() => null) as { error?: string | { message?: string } } | null;
+  if (response.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event(ACCESS_REQUIRED_EVENT));
   if (!response.ok) {
     const message = typeof data?.error === 'string' ? data.error : data?.error?.message;
     throw new DatasetError(message || 'เชื่อมต่อบริการข้อมูลไม่สำเร็จ กรุณาลองอีกครั้ง', response.status);
@@ -57,6 +62,10 @@ async function readJson<T>(response: Response): Promise<T> {
   return data as T;
 }
 
+export const getAccess = (signal?: AbortSignal) =>
+  fetch('/api/access', { signal, cache: 'no-store' }).then(readJson<AccessState>);
+export const unlockAccess = (password: string) =>
+  fetch('/api/access', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) }).then(readJson<AccessState>);
 export const getDatasetConfig = (signal?: AbortSignal) =>
   fetch('/api/datasets/config', { signal, cache: 'no-store' }).then(readJson<DatasetConfig>);
 export const getDatasetJob = (id: string, signal?: AbortSignal) =>

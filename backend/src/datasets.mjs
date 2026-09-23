@@ -195,7 +195,7 @@ export function createDatasetService(options = {}) {
       advance(job, stage, 35 + Math.min(100, Math.max(0, event.progress)) * 0.35);
     }, config.timeoutMs, job.controller.signal), job.dataset);
     advance(job, 'ai', 75);
-    analysis.ai = await analyzeWithAi(job.dataset, analysis, { apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, objective, timeoutMs: config.aiTimeoutMs, signal: job.controller.signal, fetcher: config.fetcher || fetch });
+    analysis.ai = await analyzeWithAi(job.dataset, analysis, { apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, objective, timeoutMs: config.aiTimeoutMs, signal: job.controller.signal, fetcher: config.fetcher || fetch, budget: config.aiBudget });
     if (!jobs.has(job.id)) return;
     advance(job, 'dashboard', 90);
     if (analysis.ai.status === 'complete') {

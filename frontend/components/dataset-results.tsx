@@ -3,7 +3,6 @@
 import { Component, lazy, Suspense, useRef, useState, type ReactNode } from 'react';
 import { BarChart3, Download, FileCode2, FileSpreadsheet, FileText, Info, LoaderCircle, Printer } from 'lucide-react';
 import { DashboardView } from '@/components/dashboard-view';
-import { WorkbookSummary } from '@/components/workbook-summary';
 import { exportDataset, type Dataset, type DatasetJob } from '@/lib/datasets';
 import type { DatasetAnalysis, DatasetChart as Chart } from '@/lib/dataset-analysis';
 
@@ -106,6 +105,5 @@ export function DatasetResults({ id, dataset, analysis, boq, onAnalyze, retrying
         <footer>ตัวเลขทุกค่าคำนวณจากข้อมูลในไฟล์ที่อัปโหลด ข้อเสนอแนะควรพิจารณาร่วมกับบริบทของงานก่อนตัดสินใจ</footer>
       </article>
     </>}
-    {tab === 'report' && (boq || analysis) && <WorkbookSummary dataset={dataset} />}
   </div>;
 }

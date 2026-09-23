@@ -137,6 +137,14 @@ class DatasetTests(unittest.TestCase):
                 self.assertEqual(result["rows_count"], rows)
                 self.assertTrue(result["sheets"][0]["warnings"] or names == ["Name", "Value"])
 
+    def test_rows_before_a_table_grows_get_the_added_columns(self):
+        from analyzer import analyze
+        result = self.csv("Name,Value\nA,1\nB,2,extra\nC,3")
+        self.assertEqual([c["name"] for c in result["sheets"][0]["columns"]], ["Name", "Value", "คอลัมน์ C"])
+        rows = preview(self.database, {})["rows"]
+        self.assertEqual([row["values"] for row in rows][0], {"c0": "A", "c1": 1, "c2": None})
+        self.assertEqual(analyze(self.database)["profiles"][0]["rows_count"], 3)
+
     def test_corrupted_or_empty_csv_fails(self):
         for text, code in [('Name,Value\nA,"1\nB,2', "INVALID_FILE"), ("Name,Value\n", "EMPTY_DATASET"), ("", "EMPTY_FILE")]:
             with self.subTest(text=text):

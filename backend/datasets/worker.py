@@ -549,6 +549,9 @@ class TableWriter:
         if not self.rows:
             self.connection.execute(f'DROP TABLE "data_{self.id}"')
             return False
+        # Rows stored before the table grew lack the added columns; every row gets every key.
+        for index in range(len(self.names) - self.added_columns, len(self.names)):
+            self.connection.execute(f"""UPDATE "data_{self.id}" SET data = json_set(data, '$.c{index}', json('null')) WHERE json_type(data, '$.c{index}') IS NULL""")
         warnings = list(self.notes)
         if self.blank_rows:
             warnings.append(f"ข้ามแถวว่าง {self.blank_rows:,} แถว โดยคงเลขแถวต้นฉบับไว้")

@@ -112,7 +112,7 @@ def scan_profile(connection, sheet, top_limit):
     rows_count = 0
     for (data,) in connection.execute(f'SELECT data FROM "data_{sheet["id"]}" WHERE row_number NOT IN (SELECT value FROM json_each(?)) ORDER BY row_number', [json.dumps(sheet.get("summary_rows", []))]):
         row = json.loads(data)
-        values = [row[column["key"]] for column in columns]
+        values = [row.get(column["key"]) for column in columns]
         # Normalize numerically equal values before comparing duplicate rows.
         canonical = [token(value) for value in values]
         row_digests.add(hashlib.sha256(json.dumps(canonical, ensure_ascii=False, allow_nan=False).encode("utf-8")).digest())
@@ -253,7 +253,7 @@ def sheet_patterns(connection, sheet, profile, counters, numeric, dates):
     if pairs or categories or trends:
         for row_index, (stored,) in enumerate(connection.execute(f'SELECT data FROM "data_{sheet_id}" WHERE row_number NOT IN (SELECT value FROM json_each(?)) ORDER BY row_number', [json.dumps(sheet.get("summary_rows", []))])):
             row = json.loads(stored)
-            values = [row[column["key"]] for column in columns]
+            values = [row.get(column["key"]) for column in columns]
             for (a, b), accumulator in pairs.items():
                 x, y = values[a], values[b]
                 if not number(x) or not number(y):

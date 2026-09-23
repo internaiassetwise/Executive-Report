@@ -1,0 +1,17 @@
+# Build context rules for backend/Dockerfile only (BuildKit reads <Dockerfile>.dockerignore).
+# They must not live in a root .dockerignore: the frontend's Railpack build reads that
+# file too, and excluding frontend/ there leaves the site with no pages (404).
+**/node_modules
+**/__pycache__
+.git
+.env*
+.railway
+.claude
+tmp
+docs
+skills
+scripts
+*.md
+backend/tests
+frontend/*
+!frontend/package.json

@@ -11,7 +11,7 @@ export default defineRailway(() => {
     build: {
       builder: 'DOCKERFILE',
       dockerfilePath: 'backend/Dockerfile',
-      watchPatterns: ['/backend/**', '/shared/**', '/package.json', '/package-lock.json', '/.dockerignore'],
+      watchPatterns: ['/backend/**', '/shared/**', '/package.json', '/package-lock.json'],
     },
     start: 'npm run start:backend',
     healthcheck: '/api/health',

@@ -3,7 +3,8 @@
 import { Component, lazy, Suspense, useRef, useState, type ReactNode } from 'react';
 import { BarChart3, Download, FileCode2, FileSpreadsheet, FileText, Info, LoaderCircle, Printer } from 'lucide-react';
 import { DashboardView } from '@/components/dashboard-view';
-import { exportDataset, type Dataset, type DatasetJob } from '@/lib/datasets';
+import { DocumentDashboard } from '@/components/document-dashboard';
+import { exportDataset, type Dataset, type DatasetJob, type DocumentInfo } from '@/lib/datasets';
 import type { DatasetAnalysis, DatasetChart as Chart } from '@/lib/dataset-analysis';
 
 const DatasetChart = lazy(() => import('@/components/dataset-chart'));
@@ -24,8 +25,8 @@ function ChartPanel({ chart }: { chart: Chart }) {
   return <section className="insight-chart-panel"><div><h3>{chart.title}</h3><p>{chart.method}</p></div><ChartBoundary><Suspense fallback={<div className="insight-empty">กำลังเตรียมกราฟ…</div>}><DatasetChart chart={chart} /></Suspense></ChartBoundary></section>;
 }
 
-/** The benchmark-comparison report exactly as the BOQ engine rendered it, printable to A4. */
-function BoqReport({ id, boq, filename }: { id: string; boq: NonNullable<DatasetJob['boq']>; filename: string }) {
+/** A construction cost report exactly as the server rendered it (BOQ benchmark, bid comparison or estimate), printable to A4. */
+function DocumentReport({ id, title, filename }: { id: string; title: string; filename: string }) {
   const frame = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(1400);
   const [notice, setNotice] = useState('');
@@ -53,7 +54,7 @@ function BoqReport({ id, boq, filename }: { id: string; boq: NonNullable<Dataset
   }
   return <>
     <div className="office-commandbar">
-      <span>รายงานวิเคราะห์ปริมาณและราคา · {boq.vendors.join(', ')} เทียบ {boq.benchmark || 'ราคากลาง'}</span>
+      <span>{title}</span>
       <div>
         <button className="office-button" onClick={() => void saveHtml()}><FileCode2 size={15} />ดาวน์โหลด HTML</button>
         <button className="office-button primary" onClick={print}><Printer size={15} />พิมพ์ / บันทึกเป็น PDF</button>
@@ -65,7 +66,11 @@ function BoqReport({ id, boq, filename }: { id: string; boq: NonNullable<Dataset
   </>;
 }
 
-export function DatasetResults({ id, dataset, analysis, boq, onAnalyze, retrying }: { id: string; dataset: Dataset; analysis?: DatasetAnalysis; boq?: DatasetJob['boq']; onAnalyze: (objective: string) => Promise<void>; retrying: boolean }) {
+export function DatasetResults({ id, dataset, analysis, boq, document, onAnalyze, retrying }: { id: string; dataset: Dataset; analysis?: DatasetAnalysis; boq?: DatasetJob['boq']; document?: DocumentInfo; onAnalyze: (objective: string) => Promise<void>; retrying: boolean }) {
+  // Construction cost documents (BOQ against a benchmark, bid comparison, estimate) get their
+  // own computed dashboard and report; every other file gets the general ones.
+  const construction = document && document.type !== 'general' ? document : null;
+  const reportTitle = boq ? `รายงานวิเคราะห์ปริมาณและราคา · ${boq.vendors.join(', ')} เทียบ ${boq.benchmark || 'ราคากลาง'}` : construction ? `รายงาน${construction.label}` : '';
   const [tab, setTab] = useState<Tab>('dashboard');
   const [exporting, setExporting] = useState('');
   const [error, setError] = useState('');
@@ -81,20 +86,21 @@ export function DatasetResults({ id, dataset, analysis, boq, onAnalyze, retrying
   return <div className="office-results">
     <nav className="office-tabs" aria-label="มุมมอง">
       {tabs.map(({ id: value, label, Icon }) => <button key={value} className={tab === value ? 'active' : ''} aria-current={tab === value ? 'page' : undefined} onClick={() => setTab(value)}><Icon size={16} aria-hidden="true" />{label}</button>)}
-      <span className="office-tabs-meta">{num(dataset.rows_count)} แถว · {dataset.sheets.filter(sheet => !sheet.combined_from).length} ชีต</span>
+      <span className="office-tabs-meta">{construction ? `${construction.label} · ` : ''}{num(dataset.rows_count)} แถว · {dataset.sheets.filter(sheet => !sheet.combined_from).length} ชีต</span>
     </nav>
     {error && <div className="data-error" role="alert"><Info size={18} /><p>{error}</p></div>}
 
     {!analysis && <section className="office-card office-empty"><h2>ยังไม่ได้วิเคราะห์ไฟล์นี้</h2><p>ระบบจะคำนวณตัวเลข และสร้างแดชบอร์ดกับรายงานให้อัตโนมัติ</p><button className="office-button primary" disabled={retrying} onClick={() => void onAnalyze('')}>วิเคราะห์ข้อมูล</button></section>}
 
-    {tab === 'dashboard' && analysis?.dashboard && <DashboardView id={id} dataset={dataset} analysis={analysis} spec={analysis.dashboard} />}
-    {tab === 'dashboard' && analysis && !analysis.dashboard && <>
+    {tab === 'dashboard' && construction?.dashboard && <DocumentDashboard id={id} dataset={dataset} document={construction} />}
+    {tab === 'dashboard' && !construction?.dashboard && analysis?.dashboard && <DashboardView id={id} dataset={dataset} analysis={analysis} spec={analysis.dashboard} />}
+    {tab === 'dashboard' && !construction?.dashboard && analysis && !analysis.dashboard && <>
       <div className="insight-kpis">{analysis.kpis.map(kpi => <section key={kpi.id}><span>{kpi.name}</span><strong>{kpi.formatted_value || num(kpi.value)}</strong><small>{kpi.source.sheet}</small></section>)}</div>
       {analysis.charts.length > 0 && <div className="insight-chart-grid">{analysis.charts.map(chart => <ChartPanel key={chart.id} chart={chart} />)}</div>}
     </>}
 
-    {tab === 'report' && boq && <BoqReport id={id} boq={boq} filename={dataset.filename} />}
-    {tab === 'report' && !boq && analysis && <>
+    {tab === 'report' && (boq || construction?.has_report) && <DocumentReport id={id} title={reportTitle} filename={dataset.filename} />}
+    {tab === 'report' && !boq && !construction?.has_report && analysis && <>
       <div className="office-commandbar"><span>รายงานสรุปผลการวิเคราะห์ (A4)</span><div>
         <button className="office-button" disabled={Boolean(exporting)} onClick={() => void download('xlsx')}>{exporting === 'xlsx' ? <LoaderCircle size={15} className="data-spin" /> : <FileSpreadsheet size={15} />}ดาวน์โหลด Excel</button>
         <button className="office-button primary" disabled={Boolean(exporting)} onClick={() => void download('pdf')}>{exporting === 'pdf' ? <LoaderCircle size={15} className="data-spin" /> : <Download size={15} />}ดาวน์โหลด PDF</button>

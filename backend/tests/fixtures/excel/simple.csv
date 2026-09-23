@@ -1,0 +1,7 @@
+Order,Region,Product,Amount,Date
+SO-001,North,Cement,1200,2026-01-05
+SO-002,South,Sand,800,2026-01-09
+SO-003,North,Steel,4500,2026-02-02
+SO-004,East,Cement,950,2026-02-14
+SO-005,South,Steel,3100,2026-03-01
+SO-006,East,Sand,600,2026-03-20

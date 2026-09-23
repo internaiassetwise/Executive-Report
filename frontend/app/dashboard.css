@@ -77,3 +77,11 @@
 @media(max-width:900px){.dash-grid{grid-template-columns:1fr}.dash-header{flex-direction:column}.dash-actions{width:100%}.dash-actions .data-button{flex:1}}
 @media(max-width:560px){.dash-header{padding:18px}.dash-header h2{font-size:20px}.dash-kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.dash-kpis article{padding:14px}.dash-kpis strong{font-size:22px}.dash-range{flex-wrap:wrap}.dash-range input{max-width:none;flex:1}.dash-reset{margin-left:0}.dash-chart-canvas,.dash-panel.wide .dash-chart-canvas{height:260px}}
 @media print{.dash-filters,.dash-actions,.dash-status,.dash-data,.dash-panel-head button{display:none}.dash-panel,.dash-kpis article,.dash-insights{break-inside:avoid}.dash-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+.doc-badge{display:inline-block;font-size:11px;font-weight:600;color:#123f6d;background:#eaf1f9;border-radius:4px;padding:3px 9px}
+.doc-table{margin-top:14px}
+.doc-table-scroll{overflow:auto;max-height:420px;border:1px solid #e3e9f0;border-radius:4px}
+.doc-table table{width:100%;border-collapse:collapse;font-size:12px}
+.doc-table th{position:sticky;top:0;background:#f5f8fc;color:#455771;font-weight:500;text-align:left;padding:8px 10px;border-bottom:1px solid #e3e9f0}
+.doc-table td{padding:7px 10px;border-bottom:1px solid #eef2f6;color:#34485e;overflow-wrap:anywhere}
+.doc-table .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}

@@ -14,7 +14,7 @@ const MiB = 1024 * 1024;
 export const MULTIPART_OVERHEAD = 64 * 1024;
 const workerPath = fileURLToPath(new URL('../datasets/worker.py', import.meta.url));
 const exportWorkerPath = fileURLToPath(new URL('../datasets/exports.py', import.meta.url));
-const boqWorkerPath = fileURLToPath(new URL('../datasets/boq.py', import.meta.url));
+const documentWorkerPath = fileURLToPath(new URL('../datasets/document.py', import.meta.url));
 const defaults = {
   maxFileSize: 25 * MiB, maxRows: 100_000, maxColumns: 200, maxCells: 2_000_000,
   retentionMinutes: 60, maxConcurrent: 2, maxStored: 20, timeoutMs: 120_000,
@@ -352,7 +352,12 @@ export function createDatasetService(options = {}) {
     }, config.timeoutMs, job.controller.signal), job.dataset);
     advance(job, 'ai', 75);
     // A BOQ comparison has its own fixed report; every other file gets a report written for its content.
-    const ai = await analyzeWithAi(job.dataset, analysis, { llm: config.llm, apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, objective, timeoutMs: config.aiTimeoutMs, signal: job.controller.signal, fetcher: config.fetcher || fetch, budget: config.aiBudget, report: !job.boq });
+    // Construction cost documents have their own computed dashboard and report, so no
+    // model call is spent on them; every other file gets a report written for its content.
+    const construction = job.document && job.document.type !== 'general';
+    const ai = construction
+      ? { model: '', summary: '', insights: [], recommendations: [], status: 'skipped', message: '' }
+      : await analyzeWithAi(job.dataset, analysis, { llm: config.llm, apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, objective, timeoutMs: config.aiTimeoutMs, signal: job.controller.signal, fetcher: config.fetcher || fetch, budget: config.aiBudget, report: true });
     if (!jobs.has(job.id)) return;
     advance(job, 'dashboard', 88);
     const { dashboard: proposal, report: written, ...prose } = ai;
@@ -453,9 +458,16 @@ export function createDatasetService(options = {}) {
           if (jobs.has(id)) job.dataset = result;
           // A BOQ comparison workbook also gets the benchmark report; it needs the original file.
           if (jobs.has(id)) {
-            const html = join(directory, 'boq-report.html');
-            const boq = await worker(job, [input, filename, html], undefined, config.timeoutMs, job.controller.signal, boqWorkerPath).catch(error => { if (job.controller.signal.aborted) throw error; return null; });
-            if (boq?.mode === 'boq') job.boq = { html, vendors: boq.vendors, benchmark: boq.benchmark, headline: boq.headline };
+            // What kind of document this is; construction cost documents also get their
+            // dashboard figures and A4 report. A failure leaves the file a general one.
+            const found = await worker(job, [database, input, filename, directory], undefined, config.timeoutMs, job.controller.signal, documentWorkerPath).catch(error => { if (job.controller.signal.aborted) throw error; return null; });
+            if (found?.type && found.type !== 'general') {
+              job.document = { type: found.type, label: found.label, headline: found.headline || '', dashboard: found.dashboard || null,
+                sheet_id: found.sheet_id || null, html: found.report ? join(directory, found.report) : null };
+              if (found.type === 'benchmark') job.boq = { html: job.document.html, vendors: found.vendors || [], benchmark: found.benchmark, headline: found.headline || '' };
+            } else {
+              job.document = { type: 'general', label: found?.label || 'ข้อมูลทั่วไป' };
+            }
           }
           await rm(input, { force: true });
           if (!jobs.has(id)) return;
@@ -568,11 +580,13 @@ export function createDatasetService(options = {}) {
       if (match[2] === '/dashboard' && request.method === 'POST') return await queryDashboard(request, job);
       if (match[2] === '/export-dashboard' && request.method === 'POST') return await exportDashboard(request, job);
       if (request.method !== 'GET') throw fail('METHOD_NOT_ALLOWED', 'Method not allowed', 405);
-      if (!match[2]) return reply({ id, status: job.status, stage: job.stage, progress: job.progress, ...(job.dataset ? { dataset: job.dataset } : {}), ...(job.analysis ? { analysis: job.analysis } : {}), ...(job.boq ? { boq: { vendors: job.boq.vendors, benchmark: job.boq.benchmark, headline: job.boq.headline } } : {}), ...(job.error ? { error: job.error } : {}) });
+      if (!match[2]) return reply({ id, status: job.status, stage: job.stage, progress: job.progress, ...(job.dataset ? { dataset: job.dataset } : {}), ...(job.analysis ? { analysis: job.analysis } : {}), ...(job.boq ? { boq: { vendors: job.boq.vendors, benchmark: job.boq.benchmark, headline: job.boq.headline } } : {}), ...(job.document ? { document: { type: job.document.type, label: job.document.label, headline: job.document.headline || '', dashboard: job.document.dashboard || null, sheet_id: job.document.sheet_id || null, has_report: Boolean(job.document.html) } } : {}), ...(job.error ? { error: job.error } : {}) });
       if (match[2] === '/boq-report') {
-        if (!job.boq) throw fail('NOT_FOUND', 'ไฟล์นี้ไม่มีรายงานเปรียบเทียบ BOQ', 404);
+        // The path predates the other construction reports; it serves whichever this file has.
+        const html = job.document?.html || job.boq?.html;
+        if (!html) throw fail('NOT_FOUND', 'ไฟล์นี้ไม่มีรายงานราคาก่อสร้าง', 404);
         // Engine-rendered HTML shown in a sandboxed frame: no scripts, no remote resources.
-        return new Response(await readFile(job.boq.html), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:", 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+        return new Response(await readFile(html), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:", 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
       }
       if (match[2] === '/export') return await exportDataset(request, url, job);
       if (match[2] === '/analyze') throw fail('METHOD_NOT_ALLOWED', 'Method not allowed', 405);

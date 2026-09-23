@@ -202,10 +202,10 @@ test('capacity limits reject excess work and deletion cancels an active job', as
 });
 
 test('expired datasets cannot be read and service cleanup removes their files', async t => {
-  const { handle } = await context(t, { retentionMinutes: 0.025 });
+  const { handle } = await context(t, { retentionMinutes: 0.05 });
   const id = await upload(handle, 'name,value\nExample,1');
   assert.equal((await finish(handle, id)).status, 'ready');
-  await delay(1550);
+  await delay(3100);
   const response = await handle(request(`/${id}`));
   assert.equal(response.status, 404);
   assert.equal((await response.json()).error.code, 'DATASET_EXPIRED');

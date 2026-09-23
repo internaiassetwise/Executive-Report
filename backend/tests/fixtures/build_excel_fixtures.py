@@ -337,6 +337,61 @@ def messy_real_world():
                                                 "xl/worksheets/sheet2.xml": {"B2": 150000}})
 
 
+def bid_comparison():
+    """Three bidders and a benchmark; bidder C leaves one line unpriced; one bidder slot is an empty template."""
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "เปรียบเทียบราคา"
+    sheet.append(["ใบเปรียบเทียบราคา โครงการ อาคารทดสอบ"])
+    sheet.append([])
+    sheet.append(["ลำดับ", "รายการ", "ปริมาณ", "หน่วย", "บริษัท เอ จำกัด", None, "บริษัท บี จำกัด", None, "บริษัท ซี จำกัด", None,
+                  "บริษัท ______ จำกัด", None, "ราคากลาง", None])
+    sheet.append([None, None, None, None] + ["ราคา/หน่วย", "จำนวนเงิน"] * 5)
+    for column in "ABCD":
+        sheet.merge_cells(f"{column}3:{column}4")
+    for first, last in (("E", "F"), ("G", "H"), ("I", "J"), ("K", "L"), ("M", "N")):
+        sheet.merge_cells(f"{first}3:{last}3")
+    rows = [
+        [None, "งานดิน"],
+        [1, "ขุดดิน", 100, "ลบ.ม.", 50, 5000, 60, 6000, 45, 4500, None, None, 55, 5500],
+        [2, "ถมดิน", 50, "ลบ.ม.", 80, 4000, 70, 3500, 90, 4500, None, None, 75, 3750],
+        [None, "งานคอนกรีต"],
+        [3, "เทคอนกรีต", 20, "ลบ.ม.", 2000, 40000, 2100, 42000, 2300, 46000, None, None, 2050, 41000],
+        [4, "เหล็กเสริม", 1000, "กก.", 25, 25000, 24, 24000, None, None, None, None, 26, 26000],
+        ["รวมทั้งสิ้น", None, None, None, None, 74000, None, 75500, None, 55000, None, None, None, 76250],
+    ]
+    for row in rows:
+        sheet.append(row)
+    save(book, "bid_comparison.xlsx")
+
+
+def cost_estimate():
+    """One priced bill: material and labour split, two sections, one unpriced line and a grand total."""
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "ประมาณราคา"
+    sheet.append(["ใบประมาณราคา โครงการ บ้านตัวอย่าง"])
+    sheet.append(["ลำดับ", "รายการ", "จำนวน", "หน่วย", "ค่าวัสดุ", None, "ค่าแรง", None, "รวม"])
+    sheet.append([None, None, None, None, "ราคาต่อหน่วย", "จำนวนเงิน", "ราคาต่อหน่วย", "จำนวนเงิน", None])
+    for column in "ABCDI":
+        sheet.merge_cells(f"{column}2:{column}3")
+    sheet.merge_cells("E2:F2")
+    sheet.merge_cells("G2:H2")
+    rows = [
+        [None, "หมวด 1 งานโครงสร้าง"],
+        [1, "เสาเข็ม", 10, "ต้น", 1000, 10000, 200, 2000, 12000],
+        [2, "คานคอดิน", 5, "ม.", 800, 4000, 300, 1500, 5500],
+        [None, "หมวด 2 งานสถาปัตย์"],
+        [3, "ก่ออิฐ", 100, "ตร.ม.", 150, 15000, 100, 10000, 25000],
+        [4, "ทาสี", 200, "ตร.ม.", 40, 8000, 30, 6000, 14000],
+        [5, "ประตู", 2, "ชุด"],
+        ["รวมทั้งสิ้น", None, None, None, None, 37000, None, 19500, 56500],
+    ]
+    for row in rows:
+        sheet.append(row)
+    save(book, "cost_estimate.xlsx")
+
+
 def legacy_xls():
     import xlwt
     book = xlwt.Workbook()
@@ -362,7 +417,7 @@ def corrupted():
 def main():
     OUT.mkdir(exist_ok=True)
     for build in (simple, multi_sheet, formulas, merged_cells, hidden_sheet, multiple_tables, excel_tables, images, charts, pivot, thai,
-                  messy_real_world, legacy_xls, corrupted):
+                  messy_real_world, bid_comparison, cost_estimate, legacy_xls, corrupted):
         build()
     print("\n".join(sorted(path.name for path in OUT.iterdir())))
 

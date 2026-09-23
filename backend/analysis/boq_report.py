@@ -180,12 +180,17 @@ def render(rep, filenames=None, generated=None):
     if len(V) > 1:
         pages.append(comparison_block(rep))
     pages.append(executive_block(rep))
+    return document(f"{esc(projects[0] if len(projects) == 1 else names)} — Quantity &amp; Price Anomaly", run, pages)
+
+
+def document(title, run, pages):
+    """A4 pages in the house report style. `title` and `run` are already escaped HTML."""
     total = len(pages)
     body = ''.join(f'<section class="page"><div class="run">{run}</div>{p}<div class="foot">หน้า {i} / {total}</div></section>'
                    for i, p in enumerate(pages, 1))
     return f"""<!doctype html><html lang="th"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{esc(projects[0] if len(projects) == 1 else names)} — Quantity &amp; Price Anomaly</title>
+<title>{title}</title>
 <style>
 :root{{--navy:{NAVY};--line:#b9c4d6;--stripe:#f2f4f8;--ink:#1a1a1a;--muted:#5b6472}}
 *{{box-sizing:border-box}}

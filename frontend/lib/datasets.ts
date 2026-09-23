@@ -58,7 +58,25 @@ export interface DatasetJob {
   analysis?: DatasetAnalysis;
   /** Present when the workbook is a BOQ benchmark comparison with an engine-rendered report. */
   boq?: { vendors: string[]; benchmark?: string; headline?: string };
+  /** What kind of document the file is; construction cost documents carry their own dashboard. */
+  document?: DocumentInfo;
   error?: { code: string; message: string };
+}
+export type DocumentType = 'benchmark' | 'comparison' | 'estimate' | 'general';
+export type DocumentFormat = 'money' | 'percent' | 'percent_signed' | 'count' | 'number' | 'text';
+export interface DocumentChart {
+  id: string; title: string; kind: 'bar' | 'hbar' | 'stacked' | 'donut' | 'pareto'; format: DocumentFormat; note: string;
+  categories: string[]; series: { name: string; values: (number | null)[] }[]; reference?: { name: string; value: number };
+}
+export interface DocumentDashboardData {
+  title: string; headline: string;
+  kpis: { label: string; value: number | null; format: DocumentFormat; note: string }[];
+  charts: DocumentChart[];
+  tables: { title: string; columns: { label: string; format: DocumentFormat }[]; rows: (number | string | null)[][] }[];
+  source: { sheet: string | null; range: string | null; filename: string };
+}
+export interface DocumentInfo {
+  type: DocumentType; label: string; headline: string; dashboard: DocumentDashboardData | null; sheet_id: string | null; has_report: boolean;
 }
 export interface DatasetConfig {
   max_file_size: number;

@@ -222,7 +222,7 @@ export function DataWorkspace() {
           </ul>
           {pollError && <div className="data-inline-error" role="alert"><p>{pollError}</p><button className="office-button" onClick={() => { setPollError(''); setPollRetry(value => value + 1); }}>ตรวจสถานะอีกครั้ง</button></div>}
           <button className="data-text-button" disabled={deleting} onClick={() => void clearDataset()}>ยกเลิก</button>
-        </section> : dataset && job ? <DatasetResults key={`${job.id}:${job.analysis?.generated_at || 'preview'}`} id={job.id} dataset={dataset} analysis={job.analysis} boq={job.boq} onAnalyze={reanalyze} retrying={retrying} /> : !jobError && <div className="office-upload">
+        </section> : dataset && job ? <DatasetResults key={`${job.id}:${job.analysis?.generated_at || 'preview'}`} id={job.id} dataset={dataset} analysis={job.analysis} boq={job.boq} document={job.document} onAnalyze={reanalyze} retrying={retrying} /> : !jobError && <div className="office-upload">
           <section className="office-card" aria-label="อัปโหลดไฟล์">
             <h2>1. เลือกไฟล์ข้อมูล</h2>
             {configError ? <div className="data-inline-error" role="alert"><p>{configError}</p><button className="office-button" onClick={() => { setConfigError(''); void loadConfig(); }}>เชื่อมต่ออีกครั้ง</button></div> :

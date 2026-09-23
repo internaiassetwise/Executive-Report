@@ -8,7 +8,7 @@ import tempfile
 import unittest
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from pathlib import Path
 
 import openpyxl
@@ -117,16 +117,43 @@ class DatasetTests(unittest.TestCase):
             with self.subTest(query=query), self.assertRaises(DatasetError):
                 preview(self.database, query)
 
-    def test_invalid_headers_and_corrupted_csv_fail(self):
-        cases = [("Value,Value\n1,2", "DUPLICATE_HEADERS"), (",Value\na,2", "MISSING_HEADERS"), ("1,2\n3,4", "MISSING_HEADERS"), ('Name,Value\nA,"1\nB,2', "INVALID_FILE"), ("Name,Value\nA,2,3", "MISSING_HEADERS"), ("Name,Value\n", "EMPTY_DATASET"), ("", "EMPTY_FILE")]
-        for value, code in cases:
-            with self.subTest(value=value):
-                self.error(code, lambda: self.csv(value))
+    def fresh(self):
+        self.database.unlink(missing_ok=True)
+
+    def test_irregular_headers_are_read_instead_of_rejected(self):
+        # name, expected column names, expected data rows
+        cases = [
+            ("Value,Value\n1,2", ["Value", "Value (2)"], 1),
+            (",Value\na,2", ["คอลัมน์ A", "Value"], 1),
+            ("1,2\n3,4", ["คอลัมน์ A", "คอลัมน์ B"], 2),
+            ("Name,Value\nA,2,3", ["Name", "Value", "คอลัมน์ C"], 1),
+            ("Report 2026\n\nName,Value\nA,2\nB,3", ["Name", "Value"], 2),
+        ]
+        for text, names, rows in cases:
+            with self.subTest(text=text):
+                self.fresh()
+                result = self.csv(text)
+                self.assertEqual([column["name"] for column in result["sheets"][0]["columns"]], names)
+                self.assertEqual(result["rows_count"], rows)
+                self.assertTrue(result["sheets"][0]["warnings"] or names == ["Name", "Value"])
+
+    def test_corrupted_or_empty_csv_fails(self):
+        for text, code in [('Name,Value\nA,"1\nB,2', "INVALID_FILE"), ("Name,Value\n", "EMPTY_DATASET"), ("", "EMPTY_FILE")]:
+            with self.subTest(text=text):
+                self.fresh()
+                self.error(code, lambda: self.csv(text))
+
+    def test_thai_windows_csv_is_decoded(self):
+        result = self.csv("ชื่อ,ราคา\nปูน,100\n", encoding="cp874")
+        self.assertEqual([column["name"] for column in result["sheets"][0]["columns"]], ["ชื่อ", "ราคา"])
+        self.assertEqual(preview(self.database, {})["rows"][0]["values"], {"c0": "ปูน", "c1": 100})
 
     def test_bounded_total_rows_cells_and_columns(self):
         for limits in [{"max_rows": 1}, {"max_cells": 3}, {"max_columns": 1}]:
             with self.subTest(limits=limits):
                 self.error("LIMIT_EXCEEDED", lambda: self.csv("A,B\n1,2\n3,4", limits=limits))
+        # Data wider than the header still counts against the column limit.
+        self.error("LIMIT_EXCEEDED", lambda: self.csv("A,B\n1,2,3", limits={"max_columns": 2}))
         self.assertEqual(self.csv("A,B\n1,2\n3,4", limits={"max_rows": 2, "max_cells": 4, "max_columns": 2})["rows_count"], 2)
 
     def test_binary_cells_and_invalid_encoding_fail_without_data_in_error(self):
@@ -164,14 +191,59 @@ class DatasetTests(unittest.TestCase):
         self.assertIn("แถวสรุปยอด", warnings)
         self.assertTrue(preview(self.database, {"sheet": "s1"})["rows"][0]["values"]["c1"])
 
-    def test_xlsx_invalid_sheet_rolls_back_other_sheets(self):
+    def test_xlsx_irregular_sheets_load_alongside_others(self):
         book = openpyxl.Workbook()
         book.active.append(["Good"])
         book.active.append([1])
-        bad = book.create_sheet("Bad")
-        bad.append(["Duplicate", "Duplicate"])
-        bad.append([1, 2])
-        self.error("DUPLICATE_HEADERS", lambda: self.workbook(book))
+        odd = book.create_sheet("Odd")
+        odd.append(["Duplicate", "Duplicate"])
+        odd.append([1, 2])
+        odd.append([time(8, 30), timedelta(hours=2)])
+        result = self.workbook(book)
+        self.assertEqual([sheet["name"] for sheet in result["sheets"]], ["Sheet", "Odd"])
+        self.assertEqual([column["name"] for column in result["sheets"][0]["columns"]], ["Good"])
+        self.assertEqual([column["name"] for column in result["sheets"][1]["columns"]], ["Duplicate", "Duplicate (2)"])
+        self.assertEqual(preview(self.database, {"sheet": "s1"})["rows"][1]["values"]["c0"], "08:30:00")
+
+    def test_xlsx_title_rows_and_two_level_headers(self):
+        book = openpyxl.Workbook()
+        sheet = book.active
+        sheet.append(["รายงานเปรียบเทียบราคา"])
+        sheet.append([])
+        sheet.append(["ลำดับ", "รายการ", "ราคา", None])
+        sheet.append([None, None, "ผู้ขาย A", "ผู้ขาย B"])
+        sheet.append([1, "ปูน", 100, 110])
+        sheet.append([2, "ทราย", 50, 45])
+        result = self.workbook(book)
+        table = result["sheets"][0]
+        self.assertEqual([column["name"] for column in table["columns"]], ["ลำดับ", "รายการ", "ราคา / ผู้ขาย A", "ราคา / ผู้ขาย B"])
+        self.assertEqual(table["rows_count"], 2)
+        self.assertEqual(table["header_row"], 3)
+        self.assertEqual([row["row_number"] for row in preview(self.database, {})["rows"]], [5, 6])
+
+    def test_proposed_layout_splits_tables_and_names_columns(self):
+        book = openpyxl.Workbook()
+        sheet = book.active
+        sheet.title = "Mixed"
+        for row in [["Item", "Qty"], ["A", 1], ["B", 2], [], ["Vendor", "Price", "Days"], ["X", 10, 3], ["Y", 12, 5]]:
+            sheet.append(row)
+        source = self.root / "input.xlsx"
+        book.save(source)
+        layouts = {"Mixed": {"tables": [
+            {"title": "จำนวน", "header_rows": [1], "data_start": 2, "data_end": 3, "first_col": 1, "last_col": 2, "column_names": ["รายการ", "จำนวน"]},
+            {"title": "ราคา", "header_rows": [5], "data_start": 6, "data_end": None, "first_col": 1, "last_col": None, "column_names": None},
+        ]}}
+        result = ingest(source, self.database, "input.xlsx", None, None, layouts)
+        self.assertEqual([s["name"] for s in result["sheets"]], ["Mixed · จำนวน", "Mixed · ราคา"])
+        self.assertEqual([c["name"] for c in result["sheets"][0]["columns"]], ["รายการ", "จำนวน"])
+        self.assertEqual([c["name"] for c in result["sheets"][1]["columns"]], ["Vendor", "Price", "Days"])
+        self.assertEqual(result["rows_count"], 4)
+        # An unusable proposal falls back to the reader's own guess.
+        self.fresh()
+        broken = {"Mixed": {"tables": [{"header_rows": [3, 1], "data_start": 2}]}}
+        result = ingest(source, self.database, "input.xlsx", None, None, broken)
+        self.assertEqual(len(result["sheets"]), 1)
+        self.assertEqual([c["name"] for c in result["sheets"][0]["columns"]], ["Item", "Qty", "คอลัมน์ C"])
 
     def test_xlsx_limits_and_corruption(self):
         book = openpyxl.Workbook()
@@ -180,8 +252,13 @@ class DatasetTests(unittest.TestCase):
         second = book.create_sheet("Second")
         second.append(["B"])
         second.append([2])
-        for limits in [{"max_sheets": 1}, {"max_rows": 1}, {"max_uncompressed_bytes": 5}]:
+        # Too many sheets: the first ones are read and the rest are disclosed.
+        result = self.workbook(book, {"max_sheets": 1})
+        self.assertEqual([sheet["name"] for sheet in result["sheets"]], ["Sheet"])
+        self.assertTrue(any("2 ชีต" in warning for warning in result["warnings"]))
+        for limits in [{"max_rows": 1}, {"max_uncompressed_bytes": 5}]:
             with self.subTest(limits=limits):
+                self.fresh()
                 self.error("LIMIT_EXCEEDED", lambda: self.workbook(book, limits))
         source = self.root / "invalid.xlsx"
         source.write_bytes(b"not a zip")

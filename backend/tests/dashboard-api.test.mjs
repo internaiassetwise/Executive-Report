@@ -12,11 +12,17 @@ const csv = ['order_date,region,product,revenue,units',
   ...Array.from({ length: 36 }, (_, i) => `2026-${String(i % 6 + 1).padStart(2, '0')}-${String(i % 27 + 1).padStart(2, '0')},${['North', 'South', 'East'][i % 3]},P${i % 4},${100 + i * 5},${i % 4 + 1}`)].join('\n');
 const revenue = Array.from({ length: 36 }, (_, i) => 100 + i * 5);
 
-/** A provider stub: records the request and returns a fixed plan. No network. */
-function fakeLlm(dashboard, calls = []) {
+/** A provider stub: records the request and returns a fixed plan. No network.
+ * Layout requests (which tables are where) are answered with no proposal so the
+ * reader keeps its own guess; they are recorded separately. */
+function fakeLlm(dashboard, calls = [], layoutCalls = []) {
   return {
     name: 'fake', model: 'fake-model',
     async generateJson(request) {
+      if (request.schema?.properties?.sheets) {
+        layoutCalls.push(request);
+        return { data: { sheets: [] }, usage: {} };
+      }
       calls.push(request);
       return { data: { summary: 'สรุปจากหลักฐาน', insights: [], recommendations: [], dashboard }, usage: {} };
     },
@@ -58,10 +64,14 @@ const aiPlan = {
 
 test('an AI plan is accepted only after validation and the prompt carries no rows', async t => {
   const calls = [];
-  const handle = await context(t, fakeLlm(aiPlan, calls));
+  const layoutCalls = [];
+  const handle = await context(t, fakeLlm(aiPlan, calls, layoutCalls));
   const job = await ready(handle);
   assert.equal(calls.length, 1, 'one provider request per analysis');
-  assert.ok(!calls[0].prompt.includes('P3,'), 'no raw CSV rows in the prompt');
+  assert.ok(!calls[0].prompt.includes('P3,'), 'no raw rows in the analysis prompt');
+  // The layout request carries only the first rows of each sheet, as cells.
+  assert.equal(layoutCalls.length, 1, 'one layout request per upload');
+  assert.ok(JSON.parse(layoutCalls[0].prompt).sheets[0].rows.length <= 40);
   assert.equal(job.analysis.dashboard.source, 'ai');
   assert.equal(job.analysis.ai.dashboard, 'accepted');
   assert.deepEqual(job.analysis.dashboard.kpis.map(k => [k.column, k.agg]), [['c3', 'sum'], [null, 'count']]);

@@ -164,10 +164,10 @@ test('foreign and missing write origins are rejected and no dataset listing exis
 
 test('parser validation errors remain reviewable while uploaded bytes are removed', async t => {
   const { handle, tempBase } = await context(t);
-  const id = await upload(handle, 'name,name\nAlice,2');
+  const id = await upload(handle, 'name,value\nAlice,"2\nBob,3');
   const job = await finish(handle, id);
   assert.equal(job.status, 'error');
-  assert.equal(job.error.code, 'DUPLICATE_HEADERS');
+  assert.equal(job.error.code, 'INVALID_FILE');
   assert.equal((await handle(request(`/${id}/rows`))).status, 409);
   const roots = await readdir(tempBase);
   assert.equal(roots.length, 1);

@@ -6,6 +6,7 @@ import { extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { analyzeWithAi, DEFAULT_DATASET_MODEL } from './dataset-ai.mjs';
 import { renderDashboardHtml } from './dashboard-html.mjs';
+import { planLayouts } from './layout-ai.mjs';
 import { describeFilter, formatNumber } from '../../shared/dashboard-charts.mjs';
 
 const MiB = 1024 * 1024;
@@ -266,6 +267,27 @@ export function createDatasetService(options = {}) {
     return new Response(bytes, { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${ascii}"; filename*=UTF-8''${encodedName}`, 'Content-Length': String(bytes.length), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
   }
 
+  async function readLayouts(job, input, filename, directory) {
+    if (!config.llm) return [];
+    const samplePath = join(directory, 'sample.json');
+    const layoutPath = join(directory, 'layout.json');
+    try {
+      job.stage = 'understanding_columns';
+      await worker(job, ['sample', input, filename, samplePath, JSON.stringify(limits)], undefined, config.timeoutMs, job.controller.signal);
+      const sample = JSON.parse(await readFile(samplePath, 'utf8'));
+      const layouts = await planLayouts(sample, config.llm, job.controller.signal);
+      if (!Object.keys(layouts).length) return [];
+      await writeFile(layoutPath, JSON.stringify(layouts), { mode: 0o600 });
+      return [layoutPath];
+    } catch (error) {
+      if (job.controller.signal.aborted) throw error;
+      console.warn(JSON.stringify({ event: 'layout_fallback', reason: error?.kind || error?.code || 'error' }));
+      return [];
+    } finally {
+      await rm(samplePath, { force: true });
+    }
+  }
+
   async function removeJob(id) {
     const job = jobs.get(id);
     if (!job) return;
@@ -404,7 +426,10 @@ export function createDatasetService(options = {}) {
       jobs.set(id, job);
       job.finished = (async () => {
         try {
-          const result = await worker(job, ['ingest', input, database, filename, JSON.stringify(limits)], event => {
+          // Where the tables are is read from a sample of the first rows; every row is
+          // then loaded by Python. Without a provider the rule-based reader decides.
+          const layoutArgs = await readLayouts(job, input, filename, directory);
+          const result = await worker(job, ['ingest', input, database, filename, JSON.stringify(limits), ...layoutArgs], event => {
             if (!jobs.has(id)) return;
             if (['reading', 'validating', 'understanding_columns', 'detecting_types', 'preview'].includes(event.stage)) job.stage = event.stage;
             job.progress = Math.max(job.progress, Math.min(config.autoAnalyze ? 35 : 99, Math.max(0, config.autoAnalyze ? 5 + event.progress * 0.3 : event.progress)));

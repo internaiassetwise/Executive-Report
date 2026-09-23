@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import io
+import itertools
 import json
 import math
 import re
@@ -14,8 +15,10 @@ import sqlite3
 import sys
 import zipfile
 from xml.etree import ElementTree
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+
+import layout
 
 
 DEFAULT_LIMITS = {
@@ -85,6 +88,10 @@ def normalize(value, context):
         return value, "boolean"
     if isinstance(value, (date, datetime)):
         return value.isoformat(), "date"
+    if isinstance(value, time):
+        return value.strftime("%H:%M:%S"), "text"
+    if isinstance(value, timedelta):
+        return str(value), "text"
     if isinstance(value, (int, float)):
         if not math.isfinite(value):
             fail("UNSUPPORTED_VALUE", f"{context}: พบตัวเลขที่ไม่เป็นค่าจำกัด กรุณาแก้ไขเซลล์นี้")
@@ -110,29 +117,20 @@ def normalize(value, context):
     return value, "text"
 
 
-def validate_headers(values, sheet, row_number, max_columns):
-    if len(values) > max_columns:
-        fail("LIMIT_EXCEEDED", f"ชีต {sheet}: มีคอลัมน์เกินขีดจำกัด {max_columns:,} คอลัมน์ กรุณาแบ่งไฟล์")
-    if not values or any(blank(v) or not isinstance(v, str) for v in values):
-        fail("MISSING_HEADERS", f"ชีต {sheet} แถว {row_number}: หัวคอลัมน์ขาดหายหรือไม่ใช่ข้อความ กรุณาใส่ชื่อให้ครบทุกคอลัมน์ในแถวแรกที่มีข้อมูล")
-    names = [value.strip() for value in values]
-    if all(NUMBER.fullmatch(name) or is_iso_date(name) for name in names):
-        fail("MISSING_HEADERS", f"ชีต {sheet} แถว {row_number}: ไม่พบชื่อหัวคอลัมน์ กรุณาเพิ่มแถวชื่อคอลัมน์ก่อนข้อมูล")
-    seen = set()
-    for name in names:
-        if any(ord(char) < 32 for char in name) or len(name) > 500:
-            fail("INVALID_HEADERS", f"ชีต {sheet} แถว {row_number}: ชื่อคอลัมน์มีอักขระที่ไม่รองรับหรือยาวเกิน 500 ตัวอักษร")
-        if name.casefold() in seen:
-            fail("DUPLICATE_HEADERS", f"ชีต {sheet} แถว {row_number}: มีชื่อคอลัมน์ซ้ำ กรุณาตั้งชื่อแต่ละคอลัมน์ให้แตกต่างกัน")
-        seen.add(name.casefold())
-    return names
-
-
 def csv_rows(path):
     with path.open("rb") as raw:
         prefix = raw.read(4)
         raw.seek(0)
         encoding = "utf-16" if prefix.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
+        if encoding == "utf-8-sig":
+            # Thai Excel on Windows saves CSV as TIS-620 (cp874) unless UTF-8 is chosen.
+            head = raw.read(1_048_576)
+            raw.seek(0)
+            try:
+                head.decode("utf-8")
+            except UnicodeDecodeError as error:
+                if error.start < len(head) - 4:
+                    encoding = "cp874"
         with io.TextIOWrapper(raw, encoding=encoding, errors="strict", newline="") as stream:
             sample = stream.read(65_536)
             stream.seek(0)
@@ -262,63 +260,239 @@ def xls_rows(book, sheet):
         yield index + 1, values, 0
 
 
-def resolve_sheet_header(iterator, sheet_name, limits):
+def open_sources(input_path, filename, limits, uncached):
+    """(sheet name, row iterator factory, visibility) per sheet, the open workbooks, and notes."""
+    extension = Path(filename).suffix.casefold()
+    books, notes = [], []
+    if extension == ".xlsx":
+        xlsx_preflight(input_path, limits)
+        import openpyxl
+        book = openpyxl.load_workbook(input_path, read_only=True, data_only=True, keep_links=False)
+        formula_book = openpyxl.load_workbook(input_path, read_only=True, data_only=False, keep_links=False)
+        books = [book, formula_book]
+        pairs = list(zip(book.worksheets, formula_book.worksheets))
+        sources = [(sheet.title, (lambda s=sheet, f=formulas: xlsx_rows(s, f, uncached)), sheet.sheet_state) for sheet, formulas in pairs]
+    elif extension == ".xls":
+        import xlrd
+        book = xlrd.open_workbook(str(input_path), on_demand=True)
+        books = [book]
+        sheets = [book.sheet_by_index(index) for index in range(book.nsheets)]
+        if sum(sheet.nrows * sheet.ncols for sheet in sheets) > limits["max_cells"] * 2:
+            fail("LIMIT_EXCEEDED", f"จำนวนเซลล์ข้อมูลรวมเกิน {limits['max_cells']:,} เซลล์ กรุณาแบ่งไฟล์")
+        sources = [(sheet.name, (lambda s=sheet: xls_rows(book, s)), "visible" if sheet.visibility == 0 else "hidden") for sheet in sheets]
+    else:
+        sources = [("CSV", lambda: csv_rows(input_path), "visible")]
+    if len(sources) > limits["max_sheets"]:
+        notes.append(f"ไฟล์มี {len(sources):,} ชีต อ่าน {limits['max_sheets']} ชีตแรก ชีตที่เหลือไม่ได้นำมาวิเคราะห์")
+        sources = sources[:limits["max_sheets"]]
+    return sources, books, notes
+
+
+def close_books(books):
+    for workbook in books:
+        (workbook.release_resources if hasattr(workbook, "release_resources") else workbook.close)()
+
+
+def head_rows(iterator):
     buffer = []
-    blank_rows = 0
     for row_number, values, formulas in iterator:
+        buffer.append((row_number, list(values), formulas))
+        if len(buffer) >= layout.SAMPLE_ROWS:
+            break
+    return buffer
+
+
+def sample(input_path, filename, limits_values=None):
+    """First rows of each sheet for the layout request. Sheets whose header block
+    reads the same are sent once, with the other names listed as members."""
+    limits = limits_from({} if limits_values is None else limits_values)
+    sources, books, _ = open_sources(Path(input_path), filename, limits, {})
+    try:
+        groups, order = {}, []
+        for name, rows, _ in sources:
+            buffer = head_rows(rows())
+            view = [(number, values) for number, values, _ in buffer]
+            if not any(layout.filled(values) for _, values in view):
+                continue
+            key = layout.head_signature(view) or ("__single__", name)
+            if key not in groups:
+                groups[key] = {"sheet": name, "members": [], "rows": layout.sample_rows(view)}
+                order.append(key)
+            else:
+                groups[key]["members"].append(name)
+        sheets, size = [], 0
+        for key in order[:15]:
+            entry = groups[key]
+            size += len(json.dumps(entry, ensure_ascii=False))
+            if size > 70_000:
+                break
+            sheets.append(entry)
+        return {"filename": filename, "sheets": sheets}
+    finally:
+        close_books(books)
+
+
+class TableWriter:
+    """One detected table stored as a data_sN SQLite table."""
+
+    def __init__(self, connection, state, name, names, header_row, first_col, extendable):
+        self.connection, self.state, self.name = connection, state, name
+        self.id = f"s{state['next_id']}"
+        state["next_id"] += 1
+        self.names, self.first_col, self.extendable = list(names), first_col, extendable
+        self.max_columns = None
+        self.kinds = [set() for _ in self.names]
+        self.header_row = header_row
+        self.notes = []
+        self.rows = self.formulas = self.blank_rows = self.truncated = self.added_columns = 0
+        self.summary_rows, self.summary_labels = [], []
+        connection.execute(f'CREATE TABLE "data_{self.id}" (row_number INTEGER PRIMARY KEY, data TEXT NOT NULL)')
+
+    def add(self, row_number, values, formulas, limits, sheet_name):
+        values = list(values)
         while values and blank(values[-1]):
             values.pop()
         if not any(not blank(value) for value in values):
-            blank_rows += 1
-            continue
-        buffer.append((row_number, values, formulas))
-        if len(buffer) >= 30:
+            self.blank_rows += 1
+            return
+        if self.max_columns is None:
+            self.max_columns = limits["max_columns"]
+            self.check_columns(len(self.names))
+        if len(values) > len(self.names):
+            if self.extendable:
+                self.check_columns(len(values))
+                for index in range(len(self.names), len(values)):
+                    self.names.append(f"คอลัมน์ {layout.column_letter(self.first_col + index)}")
+                    self.kinds.append(set())
+                    self.added_columns += 1
+            else:
+                self.truncated += 1
+                values = values[:len(self.names)]
+        if self.state["rows"] + 1 > limits["max_rows"]:
+            fail("LIMIT_EXCEEDED", f"จำนวนแถวข้อมูลรวมเกิน {limits['max_rows']:,} แถว กรุณาแบ่งไฟล์")
+        self.state["cells"] += len(self.names)
+        if self.state["cells"] > limits["max_cells"]:
+            fail("LIMIT_EXCEEDED", f"จำนวนเซลล์ข้อมูลรวมเกิน {limits['max_cells']:,} เซลล์ กรุณาแบ่งไฟล์")
+        first = next((value for value in values if not blank(value)), None)
+        if isinstance(first, str) and TOTAL_ROW.match(first.strip()):
+            self.summary_rows.append(row_number)
+            self.summary_labels.append(first.strip()[:60])
+        record = {}
+        for index in range(len(self.names)):
+            value, kind = normalize(values[index] if index < len(values) else None, f"ชีต {sheet_name} แถว {row_number} คอลัมน์ {index + 1}")
+            record[f"c{index}"] = value
+            if kind != "empty":
+                self.kinds[index].add(kind)
+        self.connection.execute(f'INSERT INTO "data_{self.id}" VALUES (?, ?)', (row_number, json.dumps(record, ensure_ascii=False, allow_nan=False)))
+        self.rows += 1
+        self.state["rows"] += 1
+        self.formulas += formulas
+
+    def check_columns(self, count):
+        if count > self.max_columns:
+            fail("LIMIT_EXCEEDED", f"ตาราง {self.name} มี {count:,} คอลัมน์ เกินขีดจำกัด {self.max_columns:,} คอลัมน์ กรุณาลดจำนวนคอลัมน์")
+
+    def finish(self, result):
+        if not self.rows:
+            self.connection.execute(f'DROP TABLE "data_{self.id}"')
+            return False
+        warnings = list(self.notes)
+        if self.blank_rows:
+            warnings.append(f"ข้ามแถวว่าง {self.blank_rows:,} แถว โดยคงเลขแถวต้นฉบับไว้")
+        if self.added_columns:
+            warnings.append(f"มีข้อมูลเกินหัวคอลัมน์ จึงเพิ่มคอลัมน์ชื่ออัตโนมัติ {self.added_columns} คอลัมน์")
+        if self.truncated:
+            warnings.append(f"ตัดข้อมูลที่อยู่นอกขอบตาราง {self.truncated:,} แถว")
+        if self.formulas:
+            warnings.append(f"ใช้ค่าที่ Excel คำนวณไว้ล่าสุดของสูตร {self.formulas:,} เซลล์ ระบบไม่คำนวณสูตรใหม่")
+        if self.summary_rows:
+            warnings.append(f"ไม่นำแถวสรุปยอด {len(self.summary_rows):,} แถวมาคำนวณ ({', '.join(self.summary_labels[:4])}) เพื่อไม่ให้ยอดซ้ำ แถวเหล่านี้ยังแสดงในตารางข้อมูล")
+        columns = [{"key": f"c{index}", "name": name, "data_type": next(iter(kinds)) if len(kinds) == 1 else "mixed" if kinds else "empty"}
+                   for index, (name, kinds) in enumerate(zip(self.names, self.kinds))]
+        result["sheets"].append({"id": self.id, "name": self.name, "rows_count": self.rows, "columns": columns, "header_row": self.header_row,
+                                 "warnings": warnings, "summary_rows": self.summary_rows[:1000]})
+        result["rows_count"] += self.rows
+        result["columns_count"] += len(columns)
+        return True
+
+
+def table_notes(table, index, first_row, names, visibility):
+    notes = []
+    if not table["header_rows"]:
+        notes.append("ไม่พบแถวหัวคอลัมน์ จึงตั้งชื่อคอลัมน์อัตโนมัติ")
+    elif first_row is not None and index == 0 and table["header_rows"][0] > first_row:
+        notes.append(f"ใช้แถว {table['header_rows'][0]} เป็นหัวตาราง (ข้ามข้อความส่วนหัว {table['header_rows'][0] - first_row} แถวด้านบน)")
+    if len(table["header_rows"]) > 1:
+        notes.append(f"หัวตาราง {len(table['header_rows'])} ชั้น (แถว {table['header_rows'][0]}–{table['header_rows'][-1]}) รวมเป็นชื่อคอลัมน์")
+    automatic = sum(name.startswith("คอลัมน์ ") for name in names)
+    if automatic and table["header_rows"]:
+        notes.append(f"หัวคอลัมน์ว่าง {automatic} คอลัมน์ จึงตั้งชื่ออัตโนมัติ")
+    present = {name.casefold() for name in names}
+    renamed = [name for name in names if (match := re.fullmatch(r"(.+) \(\d+\)", name)) and match[1].casefold() in present]
+    if renamed:
+        notes.append(f"หัวคอลัมน์ซ้ำ {len(renamed)} คอลัมน์ จึงเติมลำดับต่อท้าย เช่น {renamed[0]}")
+    if visibility != "visible":
+        notes.append("ชีตนี้ถูกซ่อนในไฟล์ต้นฉบับและรวมอยู่ในข้อมูลที่อ่านแล้ว")
+    return notes
+
+
+def read_sheet(connection, state, result, sheet_name, iterator, visibility, plan, limits, uncached):
+    """Load every table of one sheet following its layout (given, or guessed from the first rows)."""
+    buffer = head_rows(iterator)
+    view = [(number, values) for number, values, _ in buffer]
+    chosen = (layout.validate(plan) if plan else None) or layout.guess(view)
+    if not chosen:
+        result["warnings"].append(f"ชีต {sheet_name}: ข้ามชีตว่างเพราะไม่มีข้อมูล")
+        return
+    tables = chosen["tables"]
+    starts = [(table["header_rows"] or [table["data_start"]])[0] for table in tables]
+    ends = [table["data_end"] or (starts[index + 1] - 1 if index + 1 < len(tables) else None) for index, table in enumerate(tables)]
+    first_row = next((number for number, values in view if layout.filled(values)), None)
+    headers = [{} for _ in tables]
+    writers = [None] * len(tables)
+    for row_number, values, formulas in itertools.chain(buffer, iterator):
+        for index, table in enumerate(tables):
+            sliced = values[table["first_col"] - 1:table["last_col"]] if table["last_col"] else values[table["first_col"] - 1:]
+            if row_number in table["header_rows"]:
+                headers[index][row_number] = sliced
+                break
+            if row_number < table["data_start"] or (ends[index] is not None and row_number > ends[index]):
+                continue
+            if writers[index] is None:
+                header_values = [headers[index][number] for number in table["header_rows"] if number in headers[index]]
+                width = max([len(v) for v in header_values] + [0])
+                while width and all(width - 1 >= len(v) or blank(v[width - 1]) for v in header_values):
+                    width -= 1
+                names = layout.column_names(header_values, table["first_col"], width) if width else []
+                # Names read by the layout request replace generated ones position by position.
+                for position, name in enumerate(table.get("column_names") or []):
+                    if name and position < len(names):
+                        names[position] = name
+                    elif name:
+                        names.append(name)
+                names = layout.column_names([names], table["first_col"], len(names)) if names else names
+                title = sheet_name if len(tables) == 1 else f"{sheet_name} · {table['title'] or f'ตาราง {index + 1}'}"
+                writers[index] = TableWriter(connection, state, title[:120], names, starts[index], table["first_col"], extendable=table["last_col"] is None)
+                writers[index].notes = table_notes(table, index, first_row, names, visibility)
+            writers[index].add(row_number, sliced, formulas, limits, sheet_name)
             break
-
-    if not buffer:
-        return None, [], None, blank_rows, []
-
-    max_width = max(len(v) for _, v, _ in buffer)
-    first_row_num, first_values, _ = buffer[0]
-
-    # Check if the first row is a title/banner row rather than the table header
-    # (e.g. 1 cell title when table has 3+ columns, or 1-2 cell banner when table has 4+ columns).
-    is_title_banner = max_width >= 3 and len(first_values) < max_width and len(first_values) <= (1 if max_width == 3 else 2)
-
-    chosen_idx = 0
-    chosen_names = None
-
-    if is_title_banner:
-        for idx in range(1, len(buffer)):
-            row_number, values, _ = buffer[idx]
-            if len(values) >= max(3, int(max_width * 0.7)):
-                try:
-                    chosen_names = validate_headers(values, sheet_name, row_number, limits["max_columns"])
-                    chosen_idx = idx
-                    break
-                except DatasetError:
-                    pass
-
-    if chosen_names is None:
-        chosen_names = validate_headers(first_values, sheet_name, first_row_num, limits["max_columns"])
-        chosen_idx = 0
-
-    header_row_num, _, _ = buffer[chosen_idx]
-    skipped_rows = buffer[:chosen_idx]
-    remaining_rows = buffer[chosen_idx + 1:]
-
-    warnings = []
-    if skipped_rows:
-        warnings.append(f"ข้ามข้อความส่วนหัว {len(skipped_rows)} แถวก่อนเริ่มตารางข้อมูล (ใช้แถว {header_row_num} เป็นหัวตาราง)")
-
-    return chosen_names, remaining_rows, header_row_num, blank_rows, warnings
+    for writer in writers:
+        if writer is None:
+            continue
+        # Formula counts are only complete once every row has been read.
+        if uncached.get(sheet_name):
+            writer.notes.append(f"สูตร {uncached[sheet_name]:,} เซลล์ไม่มีค่าที่คำนวณไว้ จึงเก็บเป็นค่าว่าง กรุณาเปิดไฟล์ใน Excel แล้วบันทึกใหม่ก่อนอัปโหลด")
+        if not writer.finish(result):
+            result["warnings"].append(f"ชีต {writer.name}: พบเฉพาะหัวคอลัมน์ ไม่มีแถวข้อมูล จึงข้ามชีตนี้")
+    if not any(writers):
+        result["warnings"].append(f"ชีต {sheet_name}: ไม่พบแถวข้อมูล จึงข้ามชีตนี้")
 
 
-def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None):
-    import itertools
+def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None, layouts=None):
     limits = limits_from({} if limits_values is None else limits_values)
     input_path, sqlite_path = Path(input_path), Path(sqlite_path)
     progress = progress or (lambda stage, value: None)
+    layouts = layouts if isinstance(layouts, dict) else {}
     progress("validating", 20)
     extension = Path(filename).suffix.casefold()
     if extension not in (".csv", ".xlsx", ".xls"):
@@ -327,106 +501,31 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None)
         fail("EMPTY_FILE", "ไฟล์ว่าง กรุณาเลือกไฟล์ที่มีหัวคอลัมน์และแถวข้อมูล")
     if sqlite_path.exists():
         fail("INVALID_REQUEST", "พื้นที่เก็บข้อมูลชุดนี้มีอยู่แล้ว กรุณาเริ่มการอัปโหลดใหม่")
-    book = None
-    formula_book = None
+    books = []
     connection = None
     succeeded = False
     uncached = {}
     try:
-        if extension == ".xlsx":
-            xlsx_preflight(input_path, limits)
-            import openpyxl
-            book = openpyxl.load_workbook(input_path, read_only=True, data_only=True, keep_links=False)
-            formula_book = openpyxl.load_workbook(input_path, read_only=True, data_only=False, keep_links=False)
-            if len(book.worksheets) > limits["max_sheets"]:
-                fail("LIMIT_EXCEEDED", f"สมุดงานมีชีตเกินขีดจำกัด {limits['max_sheets']} ชีต กรุณาแบ่งไฟล์")
-            sources = [(sheet.title, xlsx_rows(sheet, formulas, uncached), sheet.sheet_state) for sheet, formulas in zip(book.worksheets, formula_book.worksheets)]
-        elif extension == ".xls":
-            import xlrd
-            book = xlrd.open_workbook(str(input_path), on_demand=True)
-            if book.nsheets > limits["max_sheets"]:
-                fail("LIMIT_EXCEEDED", f"สมุดงานมีชีตเกินขีดจำกัด {limits['max_sheets']} ชีต กรุณาแบ่งไฟล์")
-            sheets = [book.sheet_by_index(index) for index in range(book.nsheets)]
-            if sum(sheet.nrows * sheet.ncols for sheet in sheets) > limits["max_cells"] * 2:
-                fail("LIMIT_EXCEEDED", f"จำนวนเซลล์ข้อมูลรวมเกิน {limits['max_cells']:,} เซลล์ กรุณาแบ่งไฟล์")
-            sources = [(sheet.name, xls_rows(book, sheet), "visible" if sheet.visibility == 0 else "hidden") for sheet in sheets]
-        else:
-            sources = [("CSV", csv_rows(input_path), "visible")]
+        sources, books, notes = open_sources(input_path, filename, limits, uncached)
         progress("reading", 35)
         connection = sqlite3.connect(sqlite_path)
         connection.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        result = {"filename": filename, "rows_count": 0, "columns_count": 0, "sheets": [], "warnings": [], "created_at": datetime.now(timezone.utc).isoformat()}
-        total_cells = 0
-        for source_index, (sheet_name, iterator, visibility) in enumerate(sources):
+        result = {"filename": filename, "rows_count": 0, "columns_count": 0, "sheets": [], "warnings": list(notes), "created_at": datetime.now(timezone.utc).isoformat()}
+        state = {"rows": 0, "cells": 0, "next_id": 0}
+        for source_index, (sheet_name, rows, visibility) in enumerate(sources):
             progress("understanding_columns", 50)
-            names, remaining_buffer, header_row, blank_rows, header_warnings = resolve_sheet_header(iterator, sheet_name, limits)
-            if names is None:
-                result["warnings"].append(f"ชีต {sheet_name}: ข้ามชีตว่างเพราะไม่มีข้อมูล")
-                continue
-
-            columns = [{"key": f"c{i}", "name": name, "data_type": "empty"} for i, name in enumerate(names)]
-            kinds = [set() for _ in names]
-            rows_count = 0
-            formulas_count = 0
-            total_rows, total_labels = [], []
-            sheet_id = f"s{len(result['sheets'])}"
-            connection.execute(f'CREATE TABLE "data_{sheet_id}" (row_number INTEGER PRIMARY KEY, data TEXT NOT NULL)')
-
-            for row_number, values, formulas in itertools.chain(remaining_buffer, iterator):
-                while values and blank(values[-1]):
-                    values.pop()
-                if not any(not blank(value) for value in values):
-                    blank_rows += 1
-                    continue
-                if len(values) > len(names):
-                    if all(blank(v) for v in values[len(names):]):
-                        values = values[:len(names)]
-                    else:
-                        fail("MISSING_HEADERS", f"ชีต {sheet_name} แถว {row_number}: มีข้อมูลเกินจำนวนหัวคอลัมน์ กรุณาเติมหัวคอลัมน์หรือแก้จำนวนช่องให้ตรงกัน")
-                if result["rows_count"] + rows_count + 1 > limits["max_rows"]:
-                    fail("LIMIT_EXCEEDED", f"จำนวนแถวข้อมูลรวมเกิน {limits['max_rows']:,} แถว กรุณาแบ่งไฟล์")
-                total_cells += len(names)
-                if total_cells > limits["max_cells"]:
-                    fail("LIMIT_EXCEEDED", f"จำนวนเซลล์ข้อมูลรวมเกิน {limits['max_cells']:,} เซลล์ กรุณาแบ่งไฟล์")
-                first = next((value for value in values if not blank(value)), None)
-                if isinstance(first, str) and TOTAL_ROW.match(first.strip()):
-                    total_rows.append(row_number)
-                    total_labels.append(first.strip()[:60])
-                record = {}
-                for index in range(len(names)):
-                    value, kind = normalize(values[index] if index < len(values) else None, f"ชีต {sheet_name} แถว {row_number} คอลัมน์ {index + 1}")
-                    record[f"c{index}"] = value
-                    if kind != "empty":
-                        kinds[index].add(kind)
-                connection.execute(f'INSERT INTO "data_{sheet_id}" VALUES (?, ?)', (row_number, json.dumps(record, ensure_ascii=False, allow_nan=False)))
-                rows_count += 1
-                formulas_count += formulas
-                if rows_count % 5000 == 0:
-                    progress("reading", min(70, 35 + int((source_index + .5) / len(sources) * 35)))
-
-            if not rows_count:
-                fail("EMPTY_DATASET", f"ชีต {sheet_name}: พบเฉพาะหัวคอลัมน์ กรุณาเพิ่มแถวข้อมูลอย่างน้อยหนึ่งแถว")
-            warnings = list(header_warnings)
-            if blank_rows:
-                warnings.append(f"ข้ามแถวว่าง {blank_rows:,} แถว โดยคงเลขแถวต้นฉบับไว้")
-            if formulas_count:
-                warnings.append(f"ใช้ค่าที่ Excel คำนวณไว้ล่าสุดของสูตร {formulas_count:,} เซลล์ ระบบไม่คำนวณสูตรใหม่")
-            if uncached.get(sheet_name):
-                warnings.append(f"สูตร {uncached[sheet_name]:,} เซลล์ไม่มีค่าที่คำนวณไว้ จึงเก็บเป็นค่าว่าง กรุณาเปิดไฟล์ใน Excel แล้วบันทึกใหม่ก่อนอัปโหลด")
-            if total_rows:
-                warnings.append(f"ไม่นำแถวสรุปยอด {len(total_rows):,} แถวมาคำนวณ ({', '.join(total_labels[:4])}) เพื่อไม่ให้ยอดซ้ำ แถวเหล่านี้ยังแสดงในตารางข้อมูล")
-            if visibility != "visible":
-                warnings.append("ชีตนี้ถูกซ่อนในไฟล์ต้นฉบับและรวมอยู่ในข้อมูลที่อ่านแล้ว")
-            for column, types in zip(columns, kinds):
-                column["data_type"] = next(iter(types)) if len(types) == 1 else "mixed" if types else "empty"
-            result["sheets"].append({"id": sheet_id, "name": sheet_name, "rows_count": rows_count, "columns": columns, "header_row": header_row, "warnings": warnings, "summary_rows": total_rows[:1000]})
-            result["rows_count"] += rows_count
-            result["columns_count"] += len(columns)
+            try:
+                read_sheet(connection, state, result, sheet_name, rows(), visibility, layouts.get(sheet_name), limits, uncached)
+            except DatasetError as error:
+                # Limits and unsafe content stop the upload; a sheet the reader cannot follow is skipped.
+                if error.code in ("LIMIT_EXCEEDED", "UNSUPPORTED_VALUE"):
+                    raise
+                result["warnings"].append(f"ชีต {sheet_name}: {error.message} จึงข้ามชีตนี้")
             progress("reading", 35 + int((source_index + 1) / len(sources) * 35))
         if uncached.get("errors"):
             result["warnings"].append(f"พบเซลล์ข้อผิดพลาดของสูตร Excel (เช่น #DIV/0!) {uncached['errors']:,} เซลล์ เก็บเป็นค่าว่างและไม่นำมาคำนวณ")
         if not result["sheets"]:
-            fail("EMPTY_DATASET", "ไม่พบแถวข้อมูล กรุณาเลือกไฟล์ที่มีหัวคอลัมน์และข้อมูลอย่างน้อยหนึ่งแถว")
+            fail("EMPTY_DATASET", "ไม่พบแถวข้อมูล กรุณาเลือกไฟล์ที่มีข้อมูลอย่างน้อยหนึ่งตาราง")
         combine_sheets(connection, result)
         progress("detecting_types", 80)
         connection.execute("INSERT INTO metadata VALUES ('dataset', ?)", (json.dumps(result, ensure_ascii=False, allow_nan=False),))
@@ -437,7 +536,7 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None)
     except DatasetError:
         raise
     except UnicodeError:
-        fail("INVALID_ENCODING", "อ่านรหัสอักขระ CSV ไม่สำเร็จ กรุณาบันทึกเป็น CSV UTF-8 หรือ UTF-16 ที่มี BOM")
+        fail("INVALID_ENCODING", "อ่านรหัสอักขระ CSV ไม่สำเร็จ กรุณาบันทึกเป็น CSV UTF-8")
     except csv.Error:
         fail("INVALID_FILE", "โครงสร้าง CSV ไม่ถูกต้อง กรุณาตรวจเครื่องหมายคำพูด ตัวคั่น และขนาดข้อความในแต่ละเซลล์")
     except ImportError:
@@ -447,9 +546,7 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None)
     except Exception:
         fail("INVALID_FILE", "ไม่สามารถอ่านสมุดงานได้ กรุณาตรวจโครงสร้างหรือเปิดไฟล์ใน Excel แล้วบันทึกใหม่")
     finally:
-        for workbook in (book, formula_book):
-            if workbook is not None:
-                (workbook.release_resources if hasattr(workbook, "release_resources") else workbook.close)()
+        close_books(books)
         if connection is not None:
             connection.close()
         if not succeeded and connection is not None:
@@ -473,7 +570,7 @@ def combine_sheets(connection, result):
     names = [sheet["name"] for sheet in members]
     prefixes = [name.split("_", 1)[0] for name in names]
     by_prefix = all("_" in name for name in names) and 2 <= len(set(prefixes)) < len(names)
-    sheet_id = f"s{len(result['sheets'])}"
+    sheet_id = f"s{max(int(sheet['id'][1:]) for sheet in result['sheets']) + 1}"
     columns = [{**column} for column in members[0]["columns"]] + [{"key": f"c{width}", "name": "ชีต", "data_type": "text"}]
     if by_prefix:
         columns.append({"key": f"c{width + 1}", "name": "กลุ่มชีต", "data_type": "text"})
@@ -574,8 +671,13 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     try:
-        if len(sys.argv) == 6 and sys.argv[1] == "ingest":
-            result = ingest(sys.argv[2], sys.argv[3], sys.argv[4], json.loads(sys.argv[5]), lambda stage, progress: emit({"stage": stage, "progress": progress}))
+        if len(sys.argv) in (6, 7) and sys.argv[1] == "ingest":
+            layouts = json.loads(Path(sys.argv[6]).read_text(encoding="utf-8")) if len(sys.argv) == 7 else None
+            result = ingest(sys.argv[2], sys.argv[3], sys.argv[4], json.loads(sys.argv[5]), lambda stage, progress: emit({"stage": stage, "progress": progress}), layouts)
+        elif len(sys.argv) == 6 and sys.argv[1] == "sample":
+            found = sample(sys.argv[2], sys.argv[3], json.loads(sys.argv[5]))
+            Path(sys.argv[4]).write_text(json.dumps(found, ensure_ascii=False), encoding="utf-8")
+            result = {"sheets": len(found["sheets"])}
         elif len(sys.argv) == 4 and sys.argv[1] == "preview":
             result = preview(sys.argv[2], json.loads(sys.argv[3]))
         elif len(sys.argv) == 4 and sys.argv[1] == "dashboard":

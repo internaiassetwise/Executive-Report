@@ -3,7 +3,7 @@
 โปรเจกต์นี้ deploy เป็น 2 services จาก GitHub repository เดียวกัน:
 
 - `frontend`: Vinext production server มี public domain และส่งคำขอ API ผ่าน route handlers
-- `backend`: Node API อยู่ใน Railway private network และเปิด healthcheck ที่ `/api/health`
+- `backend`: Node API อยู่ใน Railway private network และเปิด healthcheck ที่ `/api/health` build จาก `backend/Dockerfile` เพราะ API เรียก Python workers (อ่าน Excel, วิเคราะห์, PDF) image จึงมี Node, Python + `backend/requirements.txt` และฟอนต์ Noto Sans Thai ในตัว ไม่ต้องตั้งค่า Python ใน dashboard
 
 ไฟล์ `.railway/railway.ts` ใช้ Railway Infrastructure as Code รุ่นปัจจุบัน แทน `railway.json` หรือ `railway.toml` ที่เลิกใช้แล้ว ทั้งสอง services ใช้ repo root เพื่อให้ `npm ci` อ่าน workspace lockfile ชุดเดียวกัน
 

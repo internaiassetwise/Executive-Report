@@ -1,0 +1,15 @@
+# Only the backend is built as an image (backend/Dockerfile); the frontend uses Railpack.
+**/node_modules
+**/__pycache__
+.git
+.env*
+.railway
+.claude
+tmp
+docs
+skills
+scripts
+*.md
+backend/tests
+frontend/*
+!frontend/package.json

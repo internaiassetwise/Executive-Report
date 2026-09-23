@@ -6,15 +6,19 @@ const source = () => github(repository, { branch: 'main' });
 export default defineRailway(() => {
   const backend = service('backend', {
     source: source(),
+    // The API spawns Python workers (Excel reading, analysis, PDF), so the image
+    // carries Node, Python with backend/requirements.txt and a Thai font.
     build: {
-      builder: 'RAILPACK',
-      buildCommand: 'npm run build:backend',
-      watchPatterns: ['/backend/**', '/package.json', '/package-lock.json'],
+      builder: 'DOCKERFILE',
+      dockerfilePath: 'backend/Dockerfile',
+      watchPatterns: ['/backend/**', '/shared/**', '/package.json', '/package-lock.json', '/.dockerignore'],
     },
     start: 'npm run start:backend',
     healthcheck: '/api/health',
     healthcheckTimeout: 300,
     deploy: {
+      // Upload jobs live in this instance's memory and temp disk.
+      numReplicas: 1,
       restartPolicyType: 'ON_FAILURE',
       restartPolicyMaxRetries: 10,
       overlapSeconds: 30,

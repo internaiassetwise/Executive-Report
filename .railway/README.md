@@ -52,9 +52,11 @@
 ## ตรวจหลัง deploy
 
 - เปิด `/` จาก public domain ของ frontend ต้องได้ HTTP 200
-- เปิด `/analysis_engine.py` ผ่าน frontend ต้องได้ Python source
-- เปิด `/api/interpret` ผ่าน frontend ต้องได้ JSON; `configured` เป็น `false` ได้เมื่อยังไม่ตั้ง Gemini
-- ส่ง POST ไป `/api/interpret` จากหน้าเว็บต้องไม่ตอบ 403 เมื่อ browser origin ตรงกับ public domain
-- Backend deployment ต้องผ่าน healthcheck `/api/health`
+- Backend deployment ต้องผ่าน healthcheck `/api/health` และ build log ต้องมีขั้น `pip install -r backend/requirements.txt`
+- เปิด `/api/datasets/config` ผ่าน frontend ต้องได้ JSON (401 = ยังต้องใส่รหัส ดู `ACCESS_PASSWORD` / `ACCESS_OPEN`)
+- อัปโหลดไฟล์ Excel เล็กๆ ต้องได้แดชบอร์ด ถ้าขึ้น "ไม่สามารถเริ่มตัวประมวลผล Python ได้" แปลว่า backend ไม่ได้ build จาก Dockerfile
+- ดาวน์โหลด PDF ต้องเห็นตัวอักษรไทย
 
-ไฟล์ Excel ถูกประมวลผลใน Web Worker/Pyodide ของเบราว์เซอร์ ไม่มีการส่ง workbook ไปเก็บที่ Railway และไม่ต้องใช้ database หรือ volume
+Variables ของ `backend`: `GEMINI_API_KEY` (seal), `GEMINI_MODEL=gemini-3-flash-preview`, `AI_DAILY_REQUEST_LIMIT` และ `ACCESS_PASSWORD` หรือ `ACCESS_OPEN=true` ถ้าไม่ต้องการรหัสผ่าน
+
+ไฟล์ที่อัปโหลดเก็บชั่วคราวบน disk ของ backend (ลบเองตาม `DATASET_RETENTION_MINUTES`) และงานอยู่ในหน่วยความจำของ instance เดียว จึงตั้ง backend ไว้ 1 replica ไม่ต้องใช้ database หรือ volume การ redeploy ทำให้งานที่ค้างอยู่หายและต้องอัปโหลดใหม่

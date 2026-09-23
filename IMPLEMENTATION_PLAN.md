@@ -1,5 +1,23 @@
 # ASW Data Insight — implementation status
 
+## AI Dashboard Generator — Phase 0 and Phase 1 (local, not deployed)
+
+| Definition of Done | Status |
+|---|---|
+| Upload XLSX/XLS/CSV, validation (extension, MIME, signature, size) | Done; `.xls` via xlrd, HTML-disguised `.xls` gets a clear message |
+| Parse, detect types, profile | Done; semantic type + role + meaning from names and values (`semantics.py`) |
+| AI analyses dataset and produces a Dashboard Specification | Done; one request returns insights + spec |
+| Spec validation; render automatically | Done; `dashboard.py` validates, invalid AI spec falls back to the rule plan |
+| KPIs from real data; interactive charts; filters; drill-down | Done; ECharts, category/date/number filters, click-to-filter |
+| Data table (server pagination, search, sort, column selection, filters) | Done |
+| AI insights traceable to calculations | Done; evidence IDs, numbers checked against evidence |
+| Export HTML / PDF | Done; standalone offline HTML, landscape PDF with chart images and data tables |
+| Error handling; no full-data transmission | Done; only aggregates reach the LLM |
+| Swappable LLM provider | Done; `backend/src/llm/` (Gemini, OpenAI-compatible) |
+| Cost and access controls | Done; minimal thinking, daily cap, token log, shared password, legacy endpoints off |
+
+Not done yet: company SSO, saved/shared dashboards, multiple files, natural-language questions (Phase 3). Railway needs Python dependencies and `ACCESS_PASSWORD` before this branch is deployed.
+
 The active UI uses a single CSV/XLSX pipeline for all datasets, including tabular BOQ. Original AssetWise branding/navy theme is retained.
 
 1. Upload/validation/parser/preview: implemented with backend Python and bounded temporary SQLite storage.

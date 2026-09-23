@@ -441,7 +441,7 @@ def analyze(sqlite_path, progress=None):
         progress("report", 95)
         result["report"] = {"sections": report_sections(result, dataset)}
         try:
-            result["dashboard"] = plan(profiles)
+            result["dashboard"] = plan(profiles, dataset["filename"])
         except DatasetError:
             result["dashboard"] = None
         json.dumps(result, ensure_ascii=False, allow_nan=False)

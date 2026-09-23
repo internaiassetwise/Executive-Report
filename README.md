@@ -1,6 +1,30 @@
-# ASW Data Insight
+# ASW Data Insight — AI Dashboard Generator
 
-วิเคราะห์ CSV/XLSX ผ่าน flow เดียว: **Upload → Validate → Profile → AI → Dashboard / Report → Export**
+อัปโหลด Excel/CSV แล้วได้ Dashboard พร้อมใช้: **Upload → Parse → Profile → AI วางแผน → Validate → Render → Filter/Explore → Export HTML/PDF**
+
+## หลักการ: AI วางแผน โปรแกรมคำนวณ
+
+| ชั้น | ไฟล์ | หน้าที่ |
+|---|---|---|
+| Parser | `backend/datasets/worker.py` | อ่าน CSV/XLSX/XLS ลง SQLite ชั่วคราว ใช้ค่าที่ Excel คำนวณไว้ของสูตร |
+| Profiler | `analyzer.py`, `semantics.py` | สถิติทุกแถว ชนิดข้อมูล (integer/decimal/date/datetime/category/…) และบทบาทคอลัมน์ (measure/dimension/time/identifier) จากชื่อ **และ** ค่าจริง |
+| AI | `backend/src/dataset-ai.mjs`, `backend/src/llm/` | **1 คำขอต่อไฟล์** ได้ Key Insights ที่อ้างหลักฐาน + Dashboard Spec (JSON) — เปลี่ยน provider ได้ (Gemini / OpenAI-compatible) |
+| Validator + Query | `backend/datasets/dashboard.py` | ตรวจ spec กับบทบาทคอลัมน์จริง (spec ไม่ผ่าน → ใช้แผนตามกฎแทน) และคำนวณ KPI/กราฟจาก SQLite ตามตัวกรอง |
+| Renderer | `frontend/components/dashboard-view.tsx`, `shared/dashboard-charts.mjs` | ECharts, ตัวกรอง, คลิกกราฟเพื่อ drill-down, ตารางข้อมูลตามตัวกรอง |
+| Export | `backend/src/dashboard-html.mjs`, `exports.py` | HTML ไฟล์เดียวเปิดออฟไลน์ (เก็บเฉพาะผลสรุป) และ PDF แนวนอน |
+
+ตัวเลขทุกค่าบน Dashboard มาจาก Python ไม่ใช่จาก AI ส่วน AI ได้รับเฉพาะสถิติ/ชื่อคอลัมน์/ค่าที่พบบ่อย ไม่ได้รับไฟล์หรือข้อมูลรายแถว
+
+## ค่าใช้จ่าย AI
+
+- เรียก AI 1 ครั้งต่อการวิเคราะห์ไฟล์ การกรอง/drill-down/export ไม่เรียก AI
+- Gemini 3 ใช้ `thinkingLevel: minimal` (ทดสอบจริง: ~3.5k input + ~1.7k output token ต่อไฟล์ ≈ $0.01)
+- `AI_DAILY_REQUEST_LIMIT` (ค่าเริ่มต้น 200/วัน) เกินแล้วใช้แผนตามกฎแทน; ทุกคำขอบันทึก `{"event":"ai_usage",…}` (จำนวน token เท่านั้น) ใน log
+- endpoint รุ่นเก่า `/api/plan`, `/api/report`, `/api/interpret` ปิดไว้ (`LEGACY_AI_ENDPOINTS=false`)
+
+## การเข้าถึง
+
+ตั้ง `ACCESS_PASSWORD` เพื่อให้ผู้ใช้ใส่รหัสผ่านก่อนใช้งาน (cookie HttpOnly 12 ชั่วโมง) บน production ถ้าไม่ตั้ง ระบบจะปฏิเสธทุกคำขอ — เป็นมาตรการชั่วคราวก่อนเชื่อม SSO ของบริษัท
 
 ใช้ชื่อ โลโก้ และธีมน้ำเงิน AssetWise เดิม ไฟล์ทั่วไปและ BOQ ไม่แยกโหมด การอ่านไฟล์/คำนวณย้ายมา Python ฝั่ง backend; frontend แสดงข้อมูล JSON และไม่โหลด Pyodide เพื่อทำงานใน flow ใหม่
 
@@ -21,7 +45,10 @@ npm run dev
 ```dotenv
 GEMINI_API_KEY=your-api-key
 GEMINI_MODEL=gemini-3-flash-preview
+# ไม่บังคับ: ACCESS_PASSWORD, AI_DAILY_REQUEST_LIMIT, LLM_PROVIDER (ดู .env.example)
 ```
+
+ทดสอบ: `npm test` (Node), `npm run test:dashboard`, `npm run test:datasets`, `npm run test:exports` (Python)
 
 โมเดลเริ่มต้นคือ **gemini-3-flash-preview** ใช้ thinkingระดับminimal และคำขอเดียวจากสถิติ/หลักฐานที่คำนวณแล้ว มี timeout และตรวจ JSON schema/เลขอ้างอิง/ตัวเลขที่ AI กล่าวอ้าง Keysอยู่ฝั่ง backend เท่านั้น หากยังไม่ตั้ง key หรือ provider มีปัญหา ผลคำนวณ Dashboard และรายงานยังเปิดได้ พร้อมแจ้งสถานะ AI และปุ่มลองใหม่
 

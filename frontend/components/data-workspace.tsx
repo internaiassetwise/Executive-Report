@@ -260,7 +260,7 @@ export function DataWorkspace() {
                 <strong>Drop your CSV or Excel file here</strong>
                 <span>หรือคลิกเพื่อเลือกไฟล์จากคอมพิวเตอร์ของคุณ</span>
                 <div className="data-upload-badges">
-                  <span className="data-badge">Supported: CSV, XLSX</span>
+                  <span className="data-badge">Supported: CSV, XLSX, XLS</span>
                   <span className="data-badge">Max size: {config ? sizeLabel(config.max_file_size) : '25 MB'}</span>
                 </div>
               </button>}

@@ -154,14 +154,15 @@ def _chart_title(kind, columns, x, y, agg):
 
 # ------------------------------------------------------------- rule-based plan
 
-def plan(profiles):
+def plan(profiles, filename=""):
     """Deterministic dashboard used when AI is off, over budget or returns an invalid spec."""
     def score(profile):
         roles = [column.get("role") for column in profile["columns"]]
         return ("measure" in roles, "dimension" in roles or "time" in roles, profile["rows_count"])
     profile = max(profiles, key=score)
     columns = profile["columns"]
-    measures = sorted((c for c in columns if c.get("role") == "measure"), key=lambda c: (c.get("meaning") not in ("money", "quantity"), c.get("meaning") is None, c["missing_count"]))
+    rank = {"money": 0, "quantity": 1}
+    measures = sorted((c for c in columns if c.get("role") == "measure"), key=lambda c: (rank.get(c.get("meaning"), 2), c["missing_count"]))
     dimensions = sorted((c for c in columns if c.get("role") == "dimension" and c["unique_count"] > 1), key=lambda c: (c["unique_count"] > 12, c["missing_count"], c["unique_count"]))
     times = [c for c in columns if c.get("role") == "time"]
     attributes = [c for c in columns if c.get("role") == "attribute" and c.get("semantic_type") == "text" and c["unique_count"] > 12]
@@ -178,7 +179,8 @@ def plan(profiles):
         charts.append({"type": "area" if main and agg(main) == "sum" else "line", "x": times[0]["key"], "y": main and main["key"], "agg": main and agg(main)})
     for dimension in dimensions[:2]:
         charts.append({"type": "bar", "x": dimension["key"], "y": main and main["key"], "agg": main and agg(main), "limit": 12})
-    small = next((d for d in dimensions if d["unique_count"] <= 8), None)
+    # A share chart only adds information for a dimension the bars do not already show.
+    small = next((d for d in dimensions[2:] if d["unique_count"] <= 8), None)
     if small:
         share = main and agg(main) == "sum"
         charts.append({"type": "donut", "x": small["key"], "y": main["key"] if share else None, "agg": "sum" if share else "count"})
@@ -193,7 +195,8 @@ def plan(profiles):
 
     filters = [{"column": times[0]["key"]}] if times else []
     filters += [{"column": d["key"]} for d in dimensions[:3]]
-    return validate({"source": "rules", "sheet_id": profile["sheet_id"], "title": f"ภาพรวมข้อมูล {profile['sheet_name']}",
+    subject = Path(filename).stem if filename and len(profiles) == 1 else profile["sheet_name"]
+    return validate({"source": "rules", "sheet_id": profile["sheet_id"], "title": f"ภาพรวมข้อมูล {subject}",
                      "kpis": kpis, "charts": charts, "filters": filters}, profiles)
 
 

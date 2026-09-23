@@ -3,6 +3,7 @@
 import { Component, lazy, Suspense, useState, type ReactNode } from 'react';
 import { BarChart3, Database, Download, FileText, Info, LoaderCircle, RefreshCw, Search, Sparkles } from 'lucide-react';
 import { DataPreview } from '@/components/data-preview';
+import { DashboardView } from '@/components/dashboard-view';
 import { exportDataset, type Dataset } from '@/lib/datasets';
 import type { DatasetAnalysis, DatasetChart as Chart, DatasetInsight, SheetProfile } from '@/lib/dataset-analysis';
 
@@ -65,7 +66,8 @@ export function DatasetResults({ id, dataset, analysis, onAnalyze, retrying }: {
 
     {tab !== 'data' && !analysis ? <section className="insight-empty-state"><Sparkles size={28} /><h2>เริ่มวิเคราะห์ข้อมูลชุดนี้</h2><p>คำนวณสถิติ ตรวจคุณภาพข้อมูล สร้างกราฟ และให้ AI สรุปรายงานจากหลักฐาน</p><button className="data-button primary" disabled={retrying} onClick={() => void onAnalyze(objective)}>วิเคราะห์ข้อมูล</button></section> : null}
 
-    {tab === 'dashboard' && analysis && <>
+    {tab === 'dashboard' && analysis?.dashboard && <DashboardView id={id} dataset={dataset} analysis={analysis} spec={analysis.dashboard} />}
+    {tab === 'dashboard' && analysis && !analysis.dashboard && <>
       <section className="insight-executive"><span className="analyst-eyebrow">EXECUTIVE SUMMARY</span><h2>ภาพรวมจากข้อมูลของคุณ</h2><p>{aiComplete && ai?.summary ? ai.summary : analysis.summary}</p><small>{aiComplete ? `คำตีความโดย ${ai.model} · อ้างอิงผลคำนวณจาก Python` : 'สรุปจากผลคำนวณและหลักฐานในชุดข้อมูล'}</small></section>
       <div className="insight-kpis">{analysis.kpis.map(kpi => <section key={kpi.id}><span>{kpi.name}</span><strong>{kpi.formatted_value || num(kpi.value)}</strong><small>{kpi.source.sheet}{kpi.source.column ? ` · ${kpi.source.column}` : ''}</small><details><summary>วิธีคำนวณ</summary><p>{kpi.method}</p></details></section>)}</div>
       <section className="insight-findings"><div className="insight-section-head"><h2>ประเด็นสำคัญ</h2><span>{analysis.insights.length} ข้อค้นพบที่มีหลักฐาน</span></div>{aiComplete && ai?.insights?.length ? ai.insights.map((insight, index) => <article key={index}><span className="insight-number">{String(index + 1).padStart(2, '0')}</span><div><h3>{insight.title}</h3><p>{insight.description}</p><small>{insight.evidence_ids.join(' · ')}</small></div></article>) : analysis.insights.slice(0, 8).map((insight, index) => <article key={insight.id}><span className="insight-number">{String(index + 1).padStart(2, '0')}</span><div><h3>{insight.title}</h3><p>{insight.description}</p><Evidence insight={insight} /></div></article>)}</section>

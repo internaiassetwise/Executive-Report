@@ -22,6 +22,7 @@
     "test": "npm run test --workspaces --if-present",
     "test:analysis": "python backend/tests/test_engine.py",
     "test:boq": "python backend/tests/test_boq.py",
+    "test:dashboard": "python backend/tests/test_dashboard.py",
     "test:datasets": "python backend/tests/test_datasets.py",
     "test:analyzer": "python backend/tests/test_analyzer.py",
     "test:exports": "python backend/tests/test_exports.py",

@@ -238,12 +238,15 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual([c["name"] for c in result["sheets"][0]["columns"]], ["รายการ", "จำนวน"])
         self.assertEqual([c["name"] for c in result["sheets"][1]["columns"]], ["Vendor", "Price", "Days"])
         self.assertEqual(result["rows_count"], 4)
-        # An unusable proposal falls back to the reader's own guess.
+        # An unusable proposal falls back to the reader's own guess, which also
+        # finds the second table below the gap.
         self.fresh()
         broken = {"Mixed": {"tables": [{"header_rows": [3, 1], "data_start": 2}]}}
         result = ingest(source, self.database, "input.xlsx", None, None, broken)
-        self.assertEqual(len(result["sheets"]), 1)
-        self.assertEqual([c["name"] for c in result["sheets"][0]["columns"]], ["Item", "Qty", "คอลัมน์ C"])
+        self.assertEqual([s["name"] for s in result["sheets"]], ["Mixed", "Mixed · ตาราง 2"])
+        self.assertEqual([c["name"] for c in result["sheets"][0]["columns"]], ["Item", "Qty"])
+        self.assertEqual([c["name"] for c in result["sheets"][1]["columns"]], ["Vendor", "Price", "Days"])
+        self.assertEqual([s["rows_count"] for s in result["sheets"]], [2, 2])
 
     def test_xlsx_limits_and_corruption(self):
         book = openpyxl.Workbook()
@@ -264,13 +267,27 @@ class DatasetTests(unittest.TestCase):
         source.write_bytes(b"not a zip")
         self.error("INVALID_FILE", lambda: ingest(source, self.database, "invalid.xlsx"))
 
-    def test_macro_payload_is_rejected(self):
+    def test_macro_parts_are_ignored_and_disclosed(self):
+        book = openpyxl.Workbook()
+        book.active.append(["Name", "Value"])
+        book.active.append(["A", 1])
+        plain = io.BytesIO()
+        book.save(plain)
         source = self.root / "macro.xlsx"
-        with zipfile.ZipFile(source, "w") as archive:
+        with zipfile.ZipFile(plain) as original, zipfile.ZipFile(source, "w") as modified:
+            for entry in original.infolist():
+                modified.writestr(entry, original.read(entry.filename))
+            modified.writestr("xl/vbaProject.bin", b"never executed")
+        result = ingest(source, self.database, "macro.xlsx")
+        self.assertEqual(result["rows_count"], 1)
+        self.assertTrue(result["workbook"]["has_macros"])
+        self.assertTrue(any("macro" in warning for warning in result["warnings"]))
+        self.fresh()
+        fake = self.root / "fake.xlsx"
+        with zipfile.ZipFile(fake, "w") as archive:
             archive.writestr("[Content_Types].xml", "<Types/>")
             archive.writestr("xl/workbook.xml", "<workbook/>")
-            archive.writestr("xl/vbaProject.bin", b"not executed")
-        self.error("UNSUPPORTED_FORMAT", lambda: ingest(source, self.database, "macro.xlsx"))
+        self.error("INVALID_FILE", lambda: ingest(fake, self.database, "fake.xlsx"))
 
     def test_corrupt_xlsx_coordinates_do_not_silently_drop_rows(self):
         book = openpyxl.Workbook()

@@ -19,6 +19,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 import layout
+import workbook
 
 
 DEFAULT_LIMITS = {
@@ -33,6 +34,10 @@ NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z")
 ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}.*)?\Z")
 # A summary line starts with a total word ("รวม (Total)", "Grand Total ...", "VAT 7%").
 TOTAL_ROW = re.compile(r"(?:grand\s*total|sub\s*-?\s*total|totals?\b|รวม|ยอดรวม|vat\b|ภาษีมูลค่าเพิ่ม)", re.I)
+# Text under a table: notes, sources and signature lines.
+NOTE_ROW = re.compile(r"\s*(?:หมายเหตุ|note\b|notes\b|remarks?\b|\*|※|ที่มา\s*[:：]|source\s*:|ลงชื่อ|ผู้จัดทำ|ผู้ตรวจสอบ|ผู้อนุมัติ|prepared\s+by|checked\s+by|approved\s+by)", re.I)
+# 1,234,567.89 as written in Thai and English reports.
+GROUPED_NUMBER = re.compile(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?\Z")
 EXCEL_ERROR = re.compile(r"#(?:DIV/0!|N/A|NAME\?|NULL!|NUM!|REF!|VALUE!|SPILL!|CALC!)")
 
 
@@ -86,6 +91,9 @@ def normalize(value, context):
         return None, "empty"
     if isinstance(value, bool):
         return value, "boolean"
+    if isinstance(value, datetime) and value.tzinfo is None and value.time() == time(0):
+        # Excel keeps every date as a date-time; a date typed without a time is just a date.
+        return value.date().isoformat(), "date"
     if isinstance(value, (date, datetime)):
         return value.isoformat(), "date"
     if isinstance(value, time):
@@ -107,6 +115,10 @@ def normalize(value, context):
         return trimmed.casefold() == "true", "boolean"
     if is_iso_date(trimmed):
         return trimmed, "date"
+    if GROUPED_NUMBER.fullmatch(trimmed):
+        number = float(trimmed.replace(",", "")) if "." in trimmed else int(trimmed.replace(",", ""))
+        if abs(number) <= MAX_SAFE_INTEGER:
+            return number, "number"
     if NUMBER.fullmatch(trimmed) and not re.match(r"[+-]?0\d", trimmed):
         try:
             number = float(trimmed) if any(c in trimmed for c in ".eE") else int(trimmed)
@@ -147,7 +159,7 @@ def csv_rows(path):
                     values = next(reader)
                 except StopIteration:
                     break
-                yield row_number, values, 0
+                yield row_number, values, 0, None
 
 
 def xlsx_preflight(path, limits):
@@ -163,155 +175,239 @@ def xlsx_preflight(path, limits):
                 fail("INVALID_FILE", "ไม่รองรับไฟล์ XLSX ที่เข้ารหัส กรุณาบันทึกสำเนาที่ไม่ใส่รหัสผ่าน")
             if "[Content_Types].xml" not in names or "xl/workbook.xml" not in names:
                 fail("INVALID_FILE", "ไฟล์นี้ไม่ใช่สมุดงาน XLSX ที่ถูกต้อง กรุณาบันทึกใหม่จาก Excel")
-            if any("vba" in name.casefold() or "macrosheet" in name.casefold() for name in names):
-                fail("UNSUPPORTED_FORMAT", "ไม่รองรับสมุดงานที่มี macro กรุณาบันทึกเป็น XLSX ที่ไม่มี macro")
-            content_types = archive.read("[Content_Types].xml")
-            if b"macroenabled" in content_types.lower() or b"macrosheet" in content_types.lower():
-                fail("UNSUPPORTED_FORMAT", "ไม่รองรับสมุดงานที่มี macro กรุณาบันทึกเป็น XLSX ที่ไม่มี macro")
+            # Macro parts are never loaded or run (openpyxl ignores them); the scan reports them.
+            content_types = archive.read("[Content_Types].xml").lower()
+            if b"spreadsheetml" not in content_types and b"sheet.macroenabled" not in content_types:
+                fail("INVALID_FILE", "ไฟล์นี้ไม่ใช่สมุดงาน XLSX ที่ถูกต้อง กรุณาบันทึกใหม่จาก Excel")
             if archive.testzip() is not None:
                 fail("INVALID_FILE", "ไฟล์ XLSX เสียหาย กรุณาเปิดไฟล์ใน Excel แล้วบันทึกใหม่")
-            # read_only iteration can silently skip repeated/out-of-order rows
-            # and synthesize enormous gaps for forged coordinates. Validate
-            # worksheet structure before trusting that iterator.
-            for name in names:
-                if name.startswith("xl/worksheets/") and name.endswith(".xml"):
-                    with archive.open(name) as source:
-                        validate_sheet_coordinates(source)
     except (zipfile.BadZipFile, OSError, RuntimeError, KeyError, ElementTree.ParseError):
         fail("INVALID_FILE", "อ่านโครงสร้างไฟล์ XLSX ไม่สำเร็จ กรุณาตรวจว่าไฟล์ไม่เสียหาย")
 
 
-def validate_sheet_coordinates(source):
-    previous_row = 0
-    current_row = None
-    previous_column = 0
-    for event, element in ElementTree.iterparse(source, events=("start", "end")):
-        tag = element.tag.rsplit("}", 1)[-1]
+class CoordinateCheck:
+    """read_only iteration can silently skip repeated/out-of-order rows and
+    synthesize enormous gaps for forged coordinates. Every worksheet's structure
+    is checked (during the workbook scan) before that iterator is trusted."""
+
+    def __init__(self):
+        self.previous_row, self.current_row, self.previous_column = 0, None, 0
+
+    def __call__(self, event, element, tag):
         if event == "start" and tag == "row":
-            row = element.get("r", str(previous_row + 1))
-            if not row.isascii() or not row.isdigit() or not previous_row < int(row) <= 1_048_576:
+            row = element.get("r", str(self.previous_row + 1))
+            if not row.isascii() or not row.isdigit() or not self.previous_row < int(row) <= 1_048_576:
                 fail("INVALID_FILE", "โครงสร้าง XLSX มีเลขแถวซ้ำ ผิดลำดับ หรือเกินขอบเขต Excel กรุณาเปิดไฟล์แล้วบันทึกใหม่")
-            current_row = previous_row = int(row)
-            previous_column = 0
+            self.current_row = self.previous_row = int(row)
+            self.previous_column = 0
         elif event == "start" and tag == "c":
-            if current_row is None:
+            if self.current_row is None:
                 fail("INVALID_FILE", "โครงสร้างเซลล์ XLSX ไม่ถูกต้อง กรุณาเปิดไฟล์ใน Excel แล้วบันทึกใหม่")
             coordinate = element.get("r")
-            column = previous_column + 1
+            column = self.previous_column + 1
             if coordinate:
                 match = re.fullmatch(r"([A-Za-z]{1,3})([1-9][0-9]{0,6})", coordinate)
-                if not match or int(match[2]) != current_row:
+                if not match or int(match[2]) != self.current_row:
                     fail("INVALID_FILE", "ตำแหน่งเซลล์ XLSX ไม่ตรงกับแถว กรุณาเปิดไฟล์ใน Excel แล้วบันทึกใหม่")
                 column = 0
                 for char in match[1].upper():
                     column = column * 26 + ord(char) - ord("A") + 1
-            if not previous_column < column <= 16_384:
+            if not self.previous_column < column <= 16_384:
                 fail("INVALID_FILE", "โครงสร้าง XLSX มีคอลัมน์ซ้ำ ผิดลำดับ หรือเกินขอบเขต Excel กรุณาเปิดไฟล์แล้วบันทึกใหม่")
-            previous_column = column
-        elif event == "end":
-            if tag == "row":
-                current_row = None
-            element.clear()
+            self.previous_column = column
+        elif event == "end" and tag == "row":
+            self.current_row = None
 
 
 def xlsx_rows(sheet, formula_sheet, uncached):
-    """Yield the values Excel last calculated. Formulas are never evaluated here;
-    a formula cell without a saved result is stored empty and counted in `uncached`."""
-    import itertools
+    """Yield (row number, values, formula cell count, extras) with the values Excel
+    last calculated. Formulas are never evaluated here; a formula cell without a
+    saved result is stored empty and counted in `uncached`. Extras carry the
+    number formats of numeric cells and the formula text by column position."""
     # Ignore inaccurate worksheet dimensions, including styled empty tails.
     sheet.reset_dimensions()
-    formula_sheet.reset_dimensions()
-    for index, (cells, formula_cells) in enumerate(itertools.zip_longest(sheet.iter_rows(), formula_sheet.iter_rows(), fillvalue=()), 1):
-        values = []
-        formulas = 0
-        for cell, source in itertools.zip_longest(cells, formula_cells):
+    if formula_sheet is not None:
+        formula_sheet.reset_dimensions()
+    formula_rows = formula_sheet.iter_rows() if formula_sheet is not None else ()
+    for index, (cells, formula_cells) in enumerate(itertools.zip_longest(sheet.iter_rows(), formula_rows, fillvalue=()), 1):
+        values, formats, formulas = [], [], {}
+        for position, (cell, source) in enumerate(itertools.zip_longest(cells, formula_cells)):
             value = cell.value if cell is not None else None
-            if cell is not None and cell.data_type == "e" or isinstance(value, str) and EXCEL_ERROR.fullmatch(value):
+            error = cell is not None and cell.data_type == "e" or isinstance(value, str) and bool(EXCEL_ERROR.fullmatch(value))
+            if error:
                 value = None
                 uncached["errors"] = uncached.get("errors", 0) + 1
             if source is not None and source.data_type == "f":
-                formulas += 1
-                if value is None:
+                formulas[position] = str(getattr(source.value, "text", source.value))[:200]
+                if value is None and not error:
                     uncached[sheet.title] = uncached.get(sheet.title, 0) + 1
             values.append(value)
+            number_format = getattr(cell, "number_format", None) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+            formats.append(number_format if number_format and number_format != "General" else None)
         while values and blank(values[-1]):
             values.pop()
-        yield index, values, formulas
+        extras = {"formats": formats[:len(values)], "formulas": formulas} if formulas or any(formats) else None
+        yield index, values, len(formulas), extras
 
 
 def xls_rows(book, sheet):
     import xlrd
+    formatted = bool(getattr(book, "formatting_info", False))
     for index in range(sheet.nrows):
-        values = []
-        for cell in sheet.row(index):
+        values, formats = [], []
+        for column, cell in enumerate(sheet.row(index)):
+            number_format = None
             if cell.ctype == xlrd.XL_CELL_DATE:
                 value = xlrd.xldate_as_datetime(cell.value, book.datemode)
                 values.append(value.date() if value.time() == datetime.min.time() else value)
             elif cell.ctype == xlrd.XL_CELL_NUMBER:
                 values.append(int(cell.value) if float(cell.value).is_integer() and abs(cell.value) <= MAX_SAFE_INTEGER else cell.value)
+                if formatted:
+                    try:
+                        number_format = book.format_map[book.xf_list[sheet.cell_xf_index(index, column)].format_key].format_str
+                    except (IndexError, KeyError):
+                        number_format = None
             elif cell.ctype == xlrd.XL_CELL_BOOLEAN:
                 values.append(bool(cell.value))
             elif cell.ctype == xlrd.XL_CELL_TEXT:
                 values.append(cell.value)
             else:
                 values.append(None)
+            formats.append(number_format if number_format and number_format != "General" else None)
         while values and blank(values[-1]):
             values.pop()
-        yield index + 1, values, 0
+        yield index + 1, values, 0, ({"formats": formats[:len(values)], "formulas": {}} if any(formats) else None)
+
+
+def xls_facts(book):
+    """Merged cells and hidden rows/columns of a legacy .xls (formatting records)."""
+    facts = workbook.empty_facts()
+    for index in range(book.nsheets):
+        sheet = book.sheet_by_index(index)
+        rowinfo = getattr(sheet, "rowinfo_map", {}) or {}
+        colinfo = getattr(sheet, "colinfo_map", {}) or {}
+        facts["sheets"][sheet.name] = {
+            "state": "visible" if sheet.visibility == 0 else "hidden", "kind": "worksheet",
+            "hidden_rows": {row + 1 for row, info in rowinfo.items() if getattr(info, "hidden", 0)},
+            "hidden_cols": {column + 1 for column, info in colinfo.items() if getattr(info, "hidden", 0)},
+            "merges": [(rlo + 1, clo + 1, rhi, chi) for rlo, rhi, clo, chi in (getattr(sheet, "merged_cells", []) or [])[:workbook.MAX_MERGES]],
+            "formulas": 0, "hyperlink_count": 0, "autofilter": None}
+    return facts
+
+
+def fill_merged(rows, merges, stats):
+    """A block merged down several rows shows its value only in its top cell.
+    Copy it down the block's first column so every row keeps its category."""
+    starts = {}
+    for first_row, first_col, last_row, last_col in merges:
+        if last_row > first_row:
+            starts.setdefault(first_row, []).append((first_col, last_row))
+    if not starts:
+        yield from rows
+        return
+    active = []
+    for row_number, values, formulas, extras in rows:
+        active = [item for item in active if item[1] >= row_number]
+        if active:
+            values = list(values)
+            for column, _, value in active:
+                while len(values) < column:
+                    values.append(None)
+                if blank(values[column - 1]):
+                    values[column - 1] = value
+                    stats["merged"] = stats.get("merged", 0) + 1
+        for column, last_row in starts.get(row_number, ()):
+            value = values[column - 1] if column <= len(values) else None
+            if not blank(value):
+                active.append((column, last_row, value))
+        yield row_number, values, formulas, extras
 
 
 def open_sources(input_path, filename, limits, uncached):
-    """(sheet name, row iterator factory, visibility) per sheet, the open workbooks, and notes."""
+    """(sheet name, row iterator factory, visibility) per sheet, the open workbooks, notes and workbook facts."""
     extension = Path(filename).suffix.casefold()
     books, notes = [], []
+    facts = workbook.empty_facts()
     if extension == ".xlsx":
         xlsx_preflight(input_path, limits)
         import openpyxl
-        book = openpyxl.load_workbook(input_path, read_only=True, data_only=True, keep_links=False)
-        formula_book = openpyxl.load_workbook(input_path, read_only=True, data_only=False, keep_links=False)
-        books = [book, formula_book]
-        pairs = list(zip(book.worksheets, formula_book.worksheets))
-        sources = [(sheet.title, (lambda s=sheet, f=formulas: xlsx_rows(s, f, uncached)), sheet.sheet_state) for sheet, formulas in pairs]
+        failed = False
+        try:
+            facts = workbook.scan(input_path, CoordinateCheck)
+        except (zipfile.BadZipFile, OSError, ElementTree.ParseError, ValueError, KeyError) as error:
+            error.__traceback__ = None
+            failed = True
+        if failed:
+            fail("INVALID_FILE", "โครงสร้าง XLSX ไม่ถูกต้อง กรุณาเปิดไฟล์ใน Excel แล้วบันทึกใหม่")
+        # The formula view is read only where formulas exist (it doubles the parsing work).
+        with_formulas = any(sheet.get("formulas") for sheet in facts["sheets"].values())
+        book = formula_book = None
+        try:
+            book = openpyxl.load_workbook(input_path, read_only=True, data_only=True, keep_links=False)
+            if with_formulas:
+                formula_book = openpyxl.load_workbook(input_path, read_only=True, data_only=False, keep_links=False)
+        except (OSError, KeyError, ValueError, TypeError, zipfile.BadZipFile, ElementTree.ParseError) as error:
+            # Drop the traceback: its frames keep openpyxl's archive handle open.
+            error.__traceback__ = None
+        if book is None or (with_formulas and formula_book is None):
+            if book is not None:
+                book.close()
+            fail("INVALID_FILE", "ไม่สามารถอ่านสมุดงานได้ กรุณาตรวจโครงสร้างหรือเปิดไฟล์ใน Excel แล้วบันทึกใหม่")
+        books = [book] + ([formula_book] if formula_book is not None else [])
+        formula_sheets = formula_book.worksheets if formula_book is not None else [None] * len(book.worksheets)
+        sources = []
+        for sheet, formulas in zip(book.worksheets, formula_sheets):
+            formulas = formulas if facts["sheets"].get(sheet.title, {}).get("formulas") else None
+            sources.append((sheet.title, (lambda s=sheet, f=formulas: xlsx_rows(s, f, uncached)), sheet.sheet_state))
     elif extension == ".xls":
         import xlrd
-        book = xlrd.open_workbook(str(input_path), on_demand=True)
+        try:
+            book = xlrd.open_workbook(str(input_path), on_demand=True, formatting_info=True)
+        except NotImplementedError:
+            book = xlrd.open_workbook(str(input_path), on_demand=True)
         books = [book]
         sheets = [book.sheet_by_index(index) for index in range(book.nsheets)]
         if sum(sheet.nrows * sheet.ncols for sheet in sheets) > limits["max_cells"] * 2:
             fail("LIMIT_EXCEEDED", f"จำนวนเซลล์ข้อมูลรวมเกิน {limits['max_cells']:,} เซลล์ กรุณาแบ่งไฟล์")
+        facts = xls_facts(book)
         sources = [(sheet.name, (lambda s=sheet: xls_rows(book, s)), "visible" if sheet.visibility == 0 else "hidden") for sheet in sheets]
     else:
         sources = [("CSV", lambda: csv_rows(input_path), "visible")]
     if len(sources) > limits["max_sheets"]:
         notes.append(f"ไฟล์มี {len(sources):,} ชีต อ่าน {limits['max_sheets']} ชีตแรก ชีตที่เหลือไม่ได้นำมาวิเคราะห์")
         sources = sources[:limits["max_sheets"]]
-    return sources, books, notes
+    return sources, books, notes, facts
 
 
 def close_books(books):
-    for workbook in books:
-        (workbook.release_resources if hasattr(workbook, "release_resources") else workbook.close)()
+    for workbook_object in books:
+        (workbook_object.release_resources if hasattr(workbook_object, "release_resources") else workbook_object.close)()
 
 
 def head_rows(iterator):
     buffer = []
-    for row_number, values, formulas in iterator:
-        buffer.append((row_number, list(values), formulas))
+    for row_number, values, formulas, extras in iterator:
+        buffer.append((row_number, list(values), formulas, extras))
         if len(buffer) >= layout.SAMPLE_ROWS:
             break
     return buffer
 
 
-def sample(input_path, filename, limits_values=None):
+def sheet_rows(rows, facts, name, stats):
+    return fill_merged(rows(), facts["sheets"].get(name, {}).get("merges", ()), stats)
+
+
+def sample(input_path, filename, limits_values=None, image_dir=None):
     """First rows of each sheet for the layout request. Sheets whose header block
-    reads the same are sent once, with the other names listed as members."""
+    reads the same are sent once, with the other names listed as members.
+    Images a vision model can read are written to `image_dir`."""
     limits = limits_from({} if limits_values is None else limits_values)
-    sources, books, _ = open_sources(Path(input_path), filename, limits, {})
+    sources, books, _, facts = open_sources(Path(input_path), filename, limits, {})
     try:
         groups, order = {}, []
         for name, rows, _ in sources:
-            buffer = head_rows(rows())
-            view = [(number, values) for number, values, _ in buffer]
+            buffer = head_rows(sheet_rows(rows, facts, name, {}))
+            view = [(number, values) for number, values, _, _ in buffer]
             if not any(layout.filled(values) for _, values in view):
                 continue
             key = layout.head_signature(view) or ("__single__", name)
@@ -327,28 +423,68 @@ def sample(input_path, filename, limits_values=None):
             if size > 70_000:
                 break
             sheets.append(entry)
-        return {"filename": filename, "sheets": sheets}
+        images = []
+        if image_dir is not None and facts["images"]:
+            Path(image_dir).mkdir(exist_ok=True)
+            images = workbook.extract_images(Path(input_path), facts, Path(image_dir))
+        return {"filename": filename, "sheets": sheets, "images": images}
     finally:
         close_books(books)
+
+
+def excel_table_layout(facts, sheet_name):
+    """Excel tables (Insert > Table) state exactly where their data is."""
+    tables = []
+    for table in facts["tables"]:
+        if table["sheet"] != sheet_name:
+            continue
+        first_row, first_col, last_row, last_col = table["bounds"]
+        header_rows = list(range(first_row, first_row + table["header_rows"]))
+        data_end = last_row - table["totals_rows"]
+        if data_end < first_row + table["header_rows"]:
+            continue
+        tables.append({"title": table["name"], "header_rows": header_rows, "data_start": first_row + table["header_rows"], "data_end": data_end,
+                       "first_col": first_col, "last_col": last_col, "column_names": [name for name in table["columns"] if name] or None})
+    return {"tables": tables} if tables else None
 
 
 class TableWriter:
     """One detected table stored as a data_sN SQLite table."""
 
-    def __init__(self, connection, state, name, names, header_row, first_col, extendable):
+    def __init__(self, connection, state, name, names, header_row, first_col, extendable, sheet_facts=None, source_sheet=None):
         self.connection, self.state, self.name = connection, state, name
         self.id = f"s{state['next_id']}"
         state["next_id"] += 1
         self.names, self.first_col, self.extendable = list(names), first_col, extendable
-        self.max_columns = None
         self.kinds = [set() for _ in self.names]
+        self.formats = [{} for _ in self.names]
+        self.formula_rows = [0 for _ in self.names]
+        self.formula_text = [None for _ in self.names]
         self.header_row = header_row
-        self.notes = []
-        self.rows = self.formulas = self.blank_rows = self.truncated = self.added_columns = 0
+        self.source_sheet = source_sheet
+        self.sheet_facts = sheet_facts or {}
+        self.notes, self.title_lines, self.footnotes = [], [], []
+        self.extra = {}
+        self.rows = self.formulas = self.blank_rows = self.truncated = self.added_columns = self.hidden_rows = self.note_rows = 0
+        self.first_row = self.last_row = None
         self.summary_rows, self.summary_labels = [], []
+        self.max_columns = None
         connection.execute(f'CREATE TABLE "data_{self.id}" (row_number INTEGER PRIMARY KEY, data TEXT NOT NULL)')
 
-    def add(self, row_number, values, formulas, limits, sheet_name):
+    def grow(self, count):
+        for index in range(len(self.names), count):
+            self.names.append(f"คอลัมน์ {layout.column_letter(self.first_col + index)}")
+            self.kinds.append(set())
+            self.formats.append({})
+            self.formula_rows.append(0)
+            self.formula_text.append(None)
+            self.added_columns += 1
+
+    def check_columns(self, count):
+        if count > self.max_columns:
+            fail("LIMIT_EXCEEDED", f"ตาราง {self.name} มี {count:,} คอลัมน์ เกินขีดจำกัด {self.max_columns:,} คอลัมน์ กรุณาลดจำนวนคอลัมน์")
+
+    def add(self, row_number, values, formulas, limits, sheet_name, extras=None):
         values = list(values)
         while values and blank(values[-1]):
             values.pop()
@@ -361,36 +497,53 @@ class TableWriter:
         if len(values) > len(self.names):
             if self.extendable:
                 self.check_columns(len(values))
-                for index in range(len(self.names), len(values)):
-                    self.names.append(f"คอลัมน์ {layout.column_letter(self.first_col + index)}")
-                    self.kinds.append(set())
-                    self.added_columns += 1
+                self.grow(len(values))
             else:
                 self.truncated += 1
                 values = values[:len(self.names)]
+        cells = [value for value in values if not blank(value)]
+        # Notes, sources and signature lines under a table are text about it, not data.
+        if all(isinstance(value, str) for value in cells) and NOTE_ROW.match(cells[0]):
+            self.note_rows += 1
+            if len(self.footnotes) < 20:
+                self.footnotes.append(re.sub(r"\s+", " ", " ".join(str(value) for value in cells)).strip()[:200])
+            return
         if self.state["rows"] + 1 > limits["max_rows"]:
             fail("LIMIT_EXCEEDED", f"จำนวนแถวข้อมูลรวมเกิน {limits['max_rows']:,} แถว กรุณาแบ่งไฟล์")
         self.state["cells"] += len(self.names)
         if self.state["cells"] > limits["max_cells"]:
             fail("LIMIT_EXCEEDED", f"จำนวนเซลล์ข้อมูลรวมเกิน {limits['max_cells']:,} เซลล์ กรุณาแบ่งไฟล์")
-        first = next((value for value in values if not blank(value)), None)
-        if isinstance(first, str) and TOTAL_ROW.match(first.strip()):
+        first = cells[0]
+        summary = isinstance(first, str) and bool(TOTAL_ROW.match(first.strip()))
+        if summary:
             self.summary_rows.append(row_number)
             self.summary_labels.append(first.strip()[:60])
+        if row_number in self.sheet_facts.get("hidden_rows", ()):
+            self.hidden_rows += 1
         record = {}
+        label = next(index for index, value in enumerate(values) if not blank(value)) if summary else None
         for index in range(len(self.names)):
             value, kind = normalize(values[index] if index < len(values) else None, f"ชีต {sheet_name} แถว {row_number} คอลัมน์ {index + 1}")
             record[f"c{index}"] = value
-            if kind != "empty":
+            # "รวมทั้งสิ้น" written in a number column does not make it a text column.
+            if kind != "empty" and index != label:
                 self.kinds[index].add(kind)
+        if extras:
+            for index, number_format in enumerate(extras.get("formats") or ()):
+                if number_format and index < len(self.names) and self.rows < 2000:
+                    counts = self.formats[index]
+                    counts[number_format] = counts.get(number_format, 0) + 1
+            for index, text in (extras.get("formulas") or {}).items():
+                # A total line's SUM() says nothing about how the column is computed.
+                if index < len(self.names) and not summary:
+                    self.formula_rows[index] += 1
+                    self.formula_text[index] = self.formula_text[index] or text
         self.connection.execute(f'INSERT INTO "data_{self.id}" VALUES (?, ?)', (row_number, json.dumps(record, ensure_ascii=False, allow_nan=False)))
         self.rows += 1
         self.state["rows"] += 1
         self.formulas += formulas
-
-    def check_columns(self, count):
-        if count > self.max_columns:
-            fail("LIMIT_EXCEEDED", f"ตาราง {self.name} มี {count:,} คอลัมน์ เกินขีดจำกัด {self.max_columns:,} คอลัมน์ กรุณาลดจำนวนคอลัมน์")
+        self.first_row = row_number if self.first_row is None else self.first_row
+        self.last_row = row_number
 
     def finish(self, result):
         if not self.rows:
@@ -407,10 +560,33 @@ class TableWriter:
             warnings.append(f"ใช้ค่าที่ Excel คำนวณไว้ล่าสุดของสูตร {self.formulas:,} เซลล์ ระบบไม่คำนวณสูตรใหม่")
         if self.summary_rows:
             warnings.append(f"ไม่นำแถวสรุปยอด {len(self.summary_rows):,} แถวมาคำนวณ ({', '.join(self.summary_labels[:4])}) เพื่อไม่ให้ยอดซ้ำ แถวเหล่านี้ยังแสดงในตารางข้อมูล")
-        columns = [{"key": f"c{index}", "name": name, "data_type": next(iter(kinds)) if len(kinds) == 1 else "mixed" if kinds else "empty"}
-                   for index, (name, kinds) in enumerate(zip(self.names, self.kinds))]
+        if self.note_rows:
+            warnings.append(f"แยกหมายเหตุหรือข้อความท้ายตาราง {self.note_rows:,} แถวออกจากข้อมูล")
+        if self.hidden_rows:
+            warnings.append(f"มีแถวที่ถูกซ่อนในไฟล์ {self.hidden_rows:,} แถว ระบบรวมไว้ในข้อมูลด้วย")
+        hidden_cols = self.sheet_facts.get("hidden_cols", ())
+        columns = []
+        for index, (name, kinds) in enumerate(zip(self.names, self.kinds)):
+            col = self.first_col + index
+            column = {"key": f"c{index}", "name": name, "data_type": next(iter(kinds)) if len(kinds) == 1 else "mixed" if kinds else "empty",
+                      "col": col, "letter": layout.column_letter(col)}
+            if self.formats[index]:
+                column["number_format"] = max(self.formats[index].items(), key=lambda item: item[1])[0][:60]
+            if self.formula_rows[index]:
+                column["formula"] = self.formula_text[index]
+                column["formula_rows"] = self.formula_rows[index]
+            if col in hidden_cols:
+                column["hidden"] = True
+            columns.append(column)
+        hidden = [column["name"] for column in columns if column.get("hidden")]
+        if hidden:
+            warnings.append(f"คอลัมน์ที่ถูกซ่อนในไฟล์ {len(hidden)} คอลัมน์ ({', '.join(hidden[:4])}) ระบบอ่านไว้แต่ไม่ใช้เป็นตัวหลักของแดชบอร์ด")
+        last_col = self.first_col + len(columns) - 1
+        area = {"first_row": self.first_row, "last_row": self.last_row, "first_col": self.first_col, "last_col": last_col,
+                "ref": f"{layout.column_letter(self.first_col)}{self.header_row or self.first_row}:{layout.column_letter(last_col)}{self.last_row}"}
         result["sheets"].append({"id": self.id, "name": self.name, "rows_count": self.rows, "columns": columns, "header_row": self.header_row,
-                                 "warnings": warnings, "summary_rows": self.summary_rows[:1000]})
+                                 "warnings": warnings, "summary_rows": self.summary_rows[:1000], "source_sheet": self.source_sheet, "area": area,
+                                 "title_lines": self.title_lines, "footnotes": self.footnotes, **self.extra})
         result["rows_count"] += self.rows
         result["columns_count"] += len(columns)
         return True
@@ -436,26 +612,69 @@ def table_notes(table, index, first_row, names, visibility):
     return notes
 
 
-def read_sheet(connection, state, result, sheet_name, iterator, visibility, plan, limits, uncached):
-    """Load every table of one sheet following its layout (given, or guessed from the first rows)."""
+def overlaps(first, second):
+    """Do two tables share any column?"""
+    first_end = first["last_col"] or 10**9
+    second_end = second["last_col"] or 10**9
+    return first["first_col"] <= second_end and second["first_col"] <= first_end
+
+
+def slice_extras(extras, first_col, last_col):
+    if not extras:
+        return None
+    start = first_col - 1
+    formats = extras.get("formats") or []
+    formats = formats[start:last_col] if last_col else formats[start:]
+    formulas = {index - start: text for index, text in (extras.get("formulas") or {}).items() if index >= start and (not last_col or index < last_col)}
+    return {"formats": formats, "formulas": formulas}
+
+
+def read_sheet(connection, state, result, sheet_name, iterator, visibility, plan, limits, uncached, facts=None, stats=None):
+    """Load every table of one sheet following its layout: Excel tables, then a
+    proposed layout, then the reader's own guess from the first rows."""
+    facts = facts or workbook.empty_facts()
+    sheet_facts = facts["sheets"].get(sheet_name, {})
     buffer = head_rows(iterator)
-    view = [(number, values) for number, values, _ in buffer]
-    chosen = (layout.validate(plan) if plan else None) or layout.guess(view)
+    view = [(number, values) for number, values, _, _ in buffer]
+    chosen, source = excel_table_layout(facts, sheet_name), "excel_table"
+    if chosen:
+        chosen = layout.validate(chosen)
+    if not chosen:
+        chosen, source = (layout.validate(plan) if plan else None), "proposed"
+    if not chosen:
+        chosen, source = layout.guess(view), "guessed"
     if not chosen:
         result["warnings"].append(f"ชีต {sheet_name}: ข้ามชีตว่างเพราะไม่มีข้อมูล")
         return
     tables = chosen["tables"]
     starts = [(table["header_rows"] or [table["data_start"]])[0] for table in tables]
-    ends = [table["data_end"] or (starts[index + 1] - 1 if index + 1 < len(tables) else None) for index, table in enumerate(tables)]
+    ends = []
+    for index, table in enumerate(tables):
+        # A table ends where the next table over the same columns begins.
+        following = [starts[other] for other in range(index + 1, len(tables)) if overlaps(table, tables[other]) and starts[other] > table["data_start"]]
+        ends.append(table["data_end"] or (min(following) - 1 if following else None))
     first_row = next((number for number, values in view if layout.filled(values)), None)
+    title_lines = []
+    for number, values in view:
+        if number >= starts[0] or len(title_lines) >= 5:
+            break
+        text = " ".join(str(value).strip() for value in values if not blank(value))
+        if text:
+            title_lines.append(text[:150])
     headers = [{} for _ in tables]
     writers = [None] * len(tables)
-    for row_number, values, formulas in itertools.chain(buffer, iterator):
+    # Guessed and proposed layouts come from the first rows only. Further down,
+    # a label row after a gap starts a new table, and a repeat of the current
+    # header (printed page breaks) is skipped.
+    follow = source != "excel_table"
+    gap, held, pending, repeated = False, [], None, {}
+
+    def process(row_number, values, formulas, extras):
         for index, table in enumerate(tables):
             sliced = values[table["first_col"] - 1:table["last_col"]] if table["last_col"] else values[table["first_col"] - 1:]
             if row_number in table["header_rows"]:
                 headers[index][row_number] = sliced
-                break
+                continue
             if row_number < table["data_start"] or (ends[index] is not None and row_number > ends[index]):
                 continue
             if writers[index] is None:
@@ -471,28 +690,150 @@ def read_sheet(connection, state, result, sheet_name, iterator, visibility, plan
                     elif name:
                         names.append(name)
                 names = layout.column_names([names], table["first_col"], len(names)) if names else names
-                title = sheet_name if len(tables) == 1 else f"{sheet_name} · {table['title'] or f'ตาราง {index + 1}'}"
-                writers[index] = TableWriter(connection, state, title[:120], names, starts[index], table["first_col"], extendable=table["last_col"] is None)
+                title = sheet_name if index == 0 and len(tables) == 1 else f"{sheet_name} · {table['title'] or f'ตาราง {index + 1}'}"
+                writers[index] = TableWriter(connection, state, title[:120], names, starts[index], table["first_col"], extendable=table["last_col"] is None,
+                                             sheet_facts=sheet_facts, source_sheet=sheet_name)
                 writers[index].notes = table_notes(table, index, first_row, names, visibility)
-            writers[index].add(row_number, sliced, formulas, limits, sheet_name)
-            break
+                writers[index].extra["layout_source"] = source
+                if source == "excel_table":
+                    writers[index].notes.insert(0, f"อ่านตามตาราง Excel ชื่อ {table['title']}")
+                if index == 0:
+                    writers[index].title_lines = title_lines
+                elif table.get("title_lines"):
+                    writers[index].title_lines = table["title_lines"]
+            writers[index].add(row_number, sliced, formulas, limits, sheet_name, slice_extras(extras, table["first_col"], table["last_col"]))
+
+    def label_row(values):
+        cells = layout.filled(values)
+        return len(cells) >= 2 and sum(layout.textual(values[i]) for i in cells) / len(cells) >= .8 \
+            and not TOTAL_ROW.match(str(values[cells[0]]).strip()) and not NOTE_ROW.match(str(values[cells[0]]))
+
+    def same_header(values):
+        """Every filled cell repeats the header text above it (a reprint may omit a few labels)."""
+        table = tables[-1]
+        sliced = values[table["first_col"] - 1:table["last_col"]] if table["last_col"] else values[table["first_col"] - 1:]
+        text = lambda value: "" if blank(value) else str(value).strip().casefold()
+        filled = [index for index, value in enumerate(sliced) if not blank(value)]
+        for header in headers[-1].values():
+            labels = [index for index, value in enumerate(header) if not blank(value)]
+            if len(filled) >= 2 and all(index < len(header) and text(sliced[index]) == text(header[index]) for index in filled)                     and len(filled) >= .6 * len(labels):
+                return True
+        return False
+
+    def start_table(row_number, values, titles):
+        cells = layout.filled(values)
+        ends[-1] = min(ends[-1], row_number - 1) if ends[-1] is not None else row_number - 1
+        tables.append({"title": " ".join(titles)[:80], "header_rows": [row_number], "data_start": row_number + 1, "data_end": None,
+                       "first_col": min(cells) + 1, "last_col": None, "column_names": None, "title_lines": titles})
+        starts.append(row_number)
+        ends.append(None)
+        headers.append({row_number: values[min(cells):]})
+        writers.append(None)
+
+    for row in itertools.chain(buffer, iterator):
+        row_number, values = row[0], row[1]
+        if not follow or writers[-1] is None or row_number < tables[-1]["data_start"] or len(tables) >= 30:
+            process(*row)
+            continue
+        cells = layout.filled(values)
+        if pending is not None:
+            if cells and any(layout.numeric(values[i]) for i in cells):
+                start_table(pending[0], pending[1], [" ".join(str(v).strip() for v in waiting[1] if not blank(v))[:150] for waiting in held])
+            else:
+                for waiting in held + [pending]:
+                    process(*waiting)
+            held, pending, gap = [], None, False
+        if not cells:
+            gap = True
+            process(*row)
+            continue
+        if same_header(values):
+            repeated[len(tables) - 1] = repeated.get(len(tables) - 1, 0) + 1
+            continue
+        if gap and len(cells) == 1 and layout.textual(values[cells[0]]) and len(held) < 3:
+            held.append(row)
+            continue
+        if gap and label_row(values):
+            pending = row
+            continue
+        for waiting in held:
+            process(*waiting)
+        held, gap = [], False
+        process(*row)
+    for waiting in held + ([pending] if pending else []):
+        process(*waiting)
+    for index, count in repeated.items():
+        if writers[index] is not None:
+            writers[index].notes.append(f"ข้ามหัวตารางที่พิมพ์ซ้ำระหว่างหน้า {count:,} แถว")
     for writer in writers:
         if writer is None:
             continue
         # Formula counts are only complete once every row has been read.
         if uncached.get(sheet_name):
             writer.notes.append(f"สูตร {uncached[sheet_name]:,} เซลล์ไม่มีค่าที่คำนวณไว้ จึงเก็บเป็นค่าว่าง กรุณาเปิดไฟล์ใน Excel แล้วบันทึกใหม่ก่อนอัปโหลด")
+        if stats and stats.get("merged") and writer is next(item for item in writers if item is not None):
+            writer.notes.append(f"เติมค่าจากเซลล์ที่ผสาน (merge) ลงแถวด้านล่าง {stats['merged']:,} เซลล์ เพื่อให้ทุกแถวมีหมวดของตัวเอง")
         if not writer.finish(result):
             result["warnings"].append(f"ชีต {writer.name}: พบเฉพาะหัวคอลัมน์ ไม่มีแถวข้อมูล จึงข้ามชีตนี้")
     if not any(writers):
         result["warnings"].append(f"ชีต {sheet_name}: ไม่พบแถวข้อมูล จึงข้ามชีตนี้")
 
 
+def clean_text(value):
+    return "".join(char for char in value if ord(char) >= 32 or char in "\r\n\t")[:2000]
+
+
+def image_tables(connection, state, result, notes, limits):
+    """Tables a vision model read from pictures in the workbook. Kept apart from
+    the cell data and flagged: their numbers come from an image, not a cell."""
+    for note in notes:
+        table = note.get("table")
+        if not isinstance(table, dict) or not isinstance(table.get("columns"), list) or not isinstance(table.get("rows"), list):
+            continue
+        names = [clean_text(str(name))[:120] for name in table["columns"][:60] if isinstance(name, (str, int, float)) and not isinstance(name, bool)]
+        rows = [row for row in table["rows"][:500] if isinstance(row, list)]
+        if not names or not rows:
+            continue
+        where = " ".join(filter(None, [str(note.get("sheet") or "")[:60], str(note.get("cell") or "")[:10]]))
+        writer = TableWriter(connection, state, f"จากรูปภาพ {where}".strip()[:120], layout.column_names([names], 1, len(names)), None, 1, extendable=False)
+        for index, row in enumerate(rows, 1):
+            values = [value if isinstance(value, (str, int, float)) and not isinstance(value, bool) else None for value in row[:len(names)]]
+            writer.add(index, [clean_text(value) if isinstance(value, str) else value for value in values], 0, limits, writer.name)
+        writer.notes = ["ข้อมูลตารางนี้ระบบอ่านจากรูปภาพในไฟล์ (OCR) ไม่ใช่ค่าจากเซลล์ กรุณาตรวจทานกับรูปต้นฉบับก่อนใช้ตัวเลข"]
+        writer.extra.update(source="image_ocr", image_id=note.get("id"))
+        if writer.finish(result):
+            note["table_sheet"] = writer.id
+
+
+def read_layout_file(value):
+    """layout.json: {"layouts": {sheet: layout}, "images": [...]} (or the older {sheet: layout})."""
+    if not isinstance(value, dict):
+        return {}, []
+    if isinstance(value.get("layouts"), dict) or isinstance(value.get("images"), list):
+        layouts = value.get("layouts") if isinstance(value.get("layouts"), dict) else {}
+        images = [note for note in value.get("images") or [] if isinstance(note, dict)][:workbook.MAX_IMAGES]
+        return layouts, images
+    return value, []
+
+
+def mark_pivots(result, facts):
+    for pivot in facts["pivots"]:
+        found = workbook.bounds(pivot.get("ref"))
+        for sheet in result["sheets"]:
+            area = sheet.get("area")
+            if sheet.get("source_sheet") != pivot["sheet"] or not area or not found:
+                continue
+            if found[0] <= area["last_row"] and area["first_row"] <= found[2]:
+                sheet["pivot"] = pivot["name"]
+                source = f" จากชีต {pivot['source_sheet']}" if pivot.get("source_sheet") else ""
+                sheet["warnings"].append(f"ตารางนี้เป็น Pivot Table ({pivot['name']}) ที่สรุปข้อมูล{source} ค่าเป็นผลที่ Excel คำนวณไว้ล่าสุด")
+
+
 def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None, layouts=None):
     limits = limits_from({} if limits_values is None else limits_values)
     input_path, sqlite_path = Path(input_path), Path(sqlite_path)
     progress = progress or (lambda stage, value: None)
-    layouts = layouts if isinstance(layouts, dict) else {}
+    layouts, image_notes = read_layout_file(layouts)
     progress("validating", 20)
     extension = Path(filename).suffix.casefold()
     if extension not in (".csv", ".xlsx", ".xls"):
@@ -506,27 +847,38 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None,
     succeeded = False
     uncached = {}
     try:
-        sources, books, notes = open_sources(input_path, filename, limits, uncached)
+        sources, books, notes, facts = open_sources(input_path, filename, limits, uncached)
         progress("reading", 35)
         connection = sqlite3.connect(sqlite_path)
         connection.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         result = {"filename": filename, "rows_count": 0, "columns_count": 0, "sheets": [], "warnings": list(notes), "created_at": datetime.now(timezone.utc).isoformat()}
+        if facts["has_macros"]:
+            result["warnings"].append("ไฟล์มี macro (VBA) ระบบอ่านเฉพาะค่าในเซลล์และไม่เรียกใช้ macro")
+        if facts["external_links"]:
+            result["warnings"].append(f"ไฟล์อ้างอิงสมุดงานภายนอก {facts['external_links']} ไฟล์ ใช้ค่าที่บันทึกไว้ล่าสุดโดยไม่เปิดไฟล์ภายนอก")
         state = {"rows": 0, "cells": 0, "next_id": 0}
         for source_index, (sheet_name, rows, visibility) in enumerate(sources):
             progress("understanding_columns", 50)
+            stats = {}
             try:
-                read_sheet(connection, state, result, sheet_name, rows(), visibility, layouts.get(sheet_name), limits, uncached)
+                read_sheet(connection, state, result, sheet_name, sheet_rows(rows, facts, sheet_name, stats), visibility, layouts.get(sheet_name), limits, uncached, facts, stats)
             except DatasetError as error:
                 # Limits and unsafe content stop the upload; a sheet the reader cannot follow is skipped.
                 if error.code in ("LIMIT_EXCEEDED", "UNSUPPORTED_VALUE"):
                     raise
                 result["warnings"].append(f"ชีต {sheet_name}: {error.message} จึงข้ามชีตนี้")
             progress("reading", 35 + int((source_index + 1) / len(sources) * 35))
+        for name, sheet in facts["sheets"].items():
+            if sheet.get("kind") == "chartsheet":
+                result["warnings"].append(f"ชีต {name} เป็นชีตกราฟ ระบบบันทึกรายละเอียดกราฟไว้ในโครงสร้างไฟล์")
         if uncached.get("errors"):
             result["warnings"].append(f"พบเซลล์ข้อผิดพลาดของสูตร Excel (เช่น #DIV/0!) {uncached['errors']:,} เซลล์ เก็บเป็นค่าว่างและไม่นำมาคำนวณ")
+        image_tables(connection, state, result, image_notes, limits)
         if not result["sheets"]:
             fail("EMPTY_DATASET", "ไม่พบแถวข้อมูล กรุณาเลือกไฟล์ที่มีข้อมูลอย่างน้อยหนึ่งตาราง")
+        mark_pivots(result, facts)
         combine_sheets(connection, result)
+        result["workbook"] = workbook.summarize(facts, result, image_notes)
         progress("detecting_types", 80)
         connection.execute("INSERT INTO metadata VALUES ('dataset', ?)", (json.dumps(result, ensure_ascii=False, allow_nan=False),))
         connection.commit()
@@ -560,6 +912,8 @@ def combine_sheets(connection, result):
     rows stay out; source sheets are untouched and dataset totals ignore it."""
     groups = {}
     for sheet in result["sheets"]:
+        if sheet.get("source") == "image_ocr" or sheet.get("pivot"):
+            continue
         signature = tuple(column["name"].casefold() for column in sheet["columns"])
         if len(signature) >= 2:
             groups.setdefault(signature, []).append(sheet)
@@ -675,9 +1029,9 @@ def main():
             layouts = json.loads(Path(sys.argv[6]).read_text(encoding="utf-8")) if len(sys.argv) == 7 else None
             result = ingest(sys.argv[2], sys.argv[3], sys.argv[4], json.loads(sys.argv[5]), lambda stage, progress: emit({"stage": stage, "progress": progress}), layouts)
         elif len(sys.argv) == 6 and sys.argv[1] == "sample":
-            found = sample(sys.argv[2], sys.argv[3], json.loads(sys.argv[5]))
+            found = sample(sys.argv[2], sys.argv[3], json.loads(sys.argv[5]), Path(sys.argv[4]).parent / "images")
             Path(sys.argv[4]).write_text(json.dumps(found, ensure_ascii=False), encoding="utf-8")
-            result = {"sheets": len(found["sheets"])}
+            result = {"sheets": len(found["sheets"]), "images": len(found["images"])}
         elif len(sys.argv) == 4 and sys.argv[1] == "preview":
             result = preview(sys.argv[2], json.loads(sys.argv[3]))
         elif len(sys.argv) == 4 and sys.argv[1] == "dashboard":

@@ -365,6 +365,114 @@ def export_pdf(dataset, analysis, output):
     document.build(story, onFirstPage=page_frame, onLaterPages=page_frame)
 
 
+def export_dashboard_pdf(payload_path, output_path):
+    """Landscape dashboard PDF. Numbers come from the server-side query in the payload;
+    chart pictures are optional JPEGs captured in the browser, never trusted for values."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.utils import ImageReader
+    from reportlab.platypus import Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    payload_path, output = Path(payload_path), Path(output_path)
+    document = json.loads(payload_path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict) or not isinstance(document.get("charts"), list) or not isinstance(document.get("kpis"), list):
+        raise ExportError("INVALID_REQUEST", "ข้อมูล Dashboard สำหรับ PDF ไม่ถูกต้อง")
+    regular, bold = pdf_fonts()
+    navy, muted, ink, line = colors.HexColor("#" + NAVY), colors.HexColor("#5C6F84"), colors.HexColor("#192D47"), colors.HexColor("#E3E9F0")
+    style = lambda name, font, size, color=ink, **extra: ParagraphStyle(name, fontName=font, fontSize=size, leading=size * 1.55, textColor=color, shaping=1, splitLongWords=True, **extra)
+    styles = {"title": style("t", bold, 20, navy, spaceAfter=4), "h": style("h", bold, 12, navy, spaceBefore=10, spaceAfter=6),
+              "body": style("b", regular, 9.5), "small": style("s", regular, 8, muted), "kpi": style("k", bold, 17, navy), "cell": style("c", regular, 8)}
+    text = lambda value, kind="body": Paragraph(escape(clean_text(value)).replace("\n", "<br/>"), styles[kind])
+    page_width, page_height = landscape(A4)
+    usable = page_width - 60
+
+    generated = str(document.get("generated_at", ""))[:16].replace("T", " ")
+    story = [text(document.get("title") or "Dashboard", "title")]
+    if document.get("description"):
+        story.append(text(document["description"]))
+    story.append(text(f"ไฟล์ {document.get('filename', '')} · ชีต {document.get('sheet', '')} · สร้างเมื่อ {generated} UTC · ใช้ {display(document.get('rows_matched'))} จาก {display(document.get('rows_total'))} แถว", "small"))
+    filters = document.get("filters") or []
+    story.append(text("ตัวกรอง: " + ("; ".join(f"{item.get('label', '')}: {item.get('text', '')}" for item in filters) if filters else "ไม่มี (ข้อมูลทั้งหมด)"), "small"))
+    story.append(Spacer(1, 8))
+
+    kpis = document["kpis"][:6]
+    if kpis:
+        cells = [[text(item.get("label", ""), "small"), text(item.get("text", "—"), "kpi")] for item in kpis]
+        table = Table([cells], colWidths=[usable / len(cells)] * len(cells))
+        table.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), .6, line), ("INNERGRID", (0, 0), (-1, -1), .6, line), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                   ("LEFTPADDING", (0, 0), (-1, -1), 9), ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]))
+        story.extend([table, Spacer(1, 10)])
+
+    def data_table(chart, limit):
+        rows = list(chart.get("data") or [])[:limit]
+        if chart.get("others"):
+            rows.append({"x": chart["others"].get("label"), "y": chart["others"].get("y")})
+        if not rows:
+            return text("ไม่มีข้อมูลตามตัวกรองนี้", "small")
+        head = [chart.get("x_name") or "กลุ่ม", "จำนวนแถว" if chart.get("type") == "histogram" else chart.get("y_name") or "จำนวนแถว"]
+        table = Table([[text(value, "cell") for value in head]] + [[text(display(row.get("x")), "cell"), text(display(row.get("y")), "cell")] for row in rows], repeatRows=1, hAlign="LEFT")
+        table.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), .4, line), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEF3F8"))]))
+        return table
+
+    cell_width = usable / 2 - 8
+    panels = []
+    for chart in document["charts"]:
+        body = [text(chart.get("title", ""), "h")]
+        image = chart.get("image")
+        picture = Path(image) if isinstance(image, str) else None
+        if picture and picture.resolve().parent == payload_path.resolve().parent and picture.is_file() and picture.read_bytes()[:3] == b"\xff\xd8\xff" and picture.stat().st_size <= 3 * 1024 * 1024:
+            width, height = ImageReader(str(picture)).getSize()
+            scale = min(cell_width / width, 210 / height)
+            body.append(Image(str(picture), width=width * scale, height=height * scale))
+        elif chart.get("error"):
+            body.append(text(chart["error"], "small"))
+        else:
+            body.append(data_table(chart, 12))
+        if chart.get("sampled"):
+            body.append(text(f"กราฟแสดงตัวอย่างจุดจาก {display(chart.get('points_total'))} คู่ข้อมูล", "small"))
+        panels.append(body)
+    if panels:
+        rows = [panels[index:index + 2] + ([[]] if len(panels[index:index + 2]) == 1 else []) for index in range(0, len(panels), 2)]
+        grid = Table(rows, colWidths=[usable / 2] * 2)
+        grid.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4)]))
+        story.append(grid)
+
+    insights = document.get("insights") or []
+    if insights or document.get("ai_summary"):
+        story.append(text("Key Insights", "h"))
+        if document.get("ai_summary"):
+            story.append(text(document["ai_summary"]))
+        for item in insights:
+            evidence = " | ".join(f"{e.get('id', '')} {e.get('method', '')}".strip() for e in item.get("evidence") or [])
+            story.append(KeepTogether([text(f"• {item.get('title', '')}", "body"), text(item.get("description", "")), text(f"หลักฐาน: {evidence}", "small")]))
+
+    story.append(text("ข้อมูลประกอบกราฟ", "h"))
+    for chart in document["charts"]:
+        story.append(KeepTogether([text(chart.get("title", ""), "body"), data_table(chart, 25), Spacer(1, 6)]))
+    story.append(text("ตัวเลขทุกค่าคำนวณจากข้อมูลทุกแถวที่ตรงตามตัวกรอง ณ เวลาส่งออก ไม่ได้มาจาก AI", "small"))
+
+    def frame(canvas, doc):
+        canvas.saveState()
+        canvas.setFillColor(navy)
+        canvas.rect(0, page_height - 7, page_width, 7, stroke=0, fill=1)
+        canvas.setFont(regular, 7.5)
+        canvas.setFillColor(muted)
+        canvas.drawString(30, 18, BRAND)
+        canvas.drawRightString(page_width - 30, 18, str(doc.page))
+        canvas.restoreState()
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(output.name + ".part")
+    try:
+        SimpleDocTemplate(str(temporary), pagesize=(page_width, page_height), leftMargin=30, rightMargin=30, topMargin=26, bottomMargin=32,
+                          title=clean_text(document.get("title") or "Dashboard"), author=BRAND, pageCompression=1).build(story, onFirstPage=frame, onLaterPages=frame)
+        temporary.replace(output)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {"path": str(output.resolve()), "mime_type": "application/pdf", "filename": output.name}
+
+
 def export_report(database, analysis_path, format_name, output_path, sheet_id=None):
     if format_name not in MIMES:
         raise ExportError("INVALID_FORMAT", "รองรับการส่งออก PDF, Excel และ CSV เท่านั้น")
@@ -397,9 +505,12 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     try:
-        if len(sys.argv) not in (6, 7) or sys.argv[1] != "export":
+        if len(sys.argv) == 4 and sys.argv[1] == "dashboard-pdf":
+            result = export_dashboard_pdf(sys.argv[2], sys.argv[3])
+        elif len(sys.argv) not in (6, 7) or sys.argv[1] != "export":
             raise ExportError("INVALID_REQUEST", "คำสั่งส่งออกไม่ถูกต้อง")
-        result = export_report(*sys.argv[2:])
+        else:
+            result = export_report(*sys.argv[2:])
         print(json.dumps({"result": result}, ensure_ascii=False, allow_nan=False))
     except ExportError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}, ensure_ascii=False))

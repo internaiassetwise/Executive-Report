@@ -6,6 +6,7 @@ import { createDatasetService } from './datasets.mjs';
 import { DEFAULT_DATASET_MODEL } from './dataset-ai.mjs';
 import { createAccessGate } from './access.mjs';
 import { createAiBudget } from './ai-budget.mjs';
+import { createLlm } from './llm/index.mjs';
 
 // Endpoints of the retired report UI. They issue many uncapped provider calls
 // per report, so they stay off unless LEGACY_AI_ENDPOINTS explicitly enables them.
@@ -15,6 +16,8 @@ export function createHandler(config, fetcher = fetch) {
   let datasets;
   const gate = config.access || createAccessGate();
   const aiBudget = config.aiBudget || createAiBudget({ dailyLimit: config.aiDailyLimit ?? 200 });
+  // Every dataset AI call goes through one provider-neutral client with the daily budget.
+  const llm = config.llm !== undefined ? config.llm : createLlm({ provider: config.llmProvider || 'gemini', apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, baseUrl: config.llmBaseUrl, fetcher, budget: aiBudget, timeoutMs: config.datasets?.aiTimeoutMs });
   async function handle(request) {
     const path = new URL(request.url).pathname;
     if (path === '/api/health' && request.method === 'GET') {
@@ -32,7 +35,7 @@ export function createHandler(config, fetcher = fetch) {
       return Response.json({error:'Method not allowed'}, {status:405});
     }
     if (path === '/api/datasets' || path.startsWith('/api/datasets/')) {
-      datasets ||= createDatasetService({ autoAnalyze: true, apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, fetcher, aiBudget, ...config.datasets, allowedOrigins: config.allowedOrigins });
+      datasets ||= createDatasetService({ autoAnalyze: true, llm, apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, fetcher, aiBudget, ...config.datasets, allowedOrigins: config.allowedOrigins });
       return datasets.handle(request);
     }
     // The browser runtime executes these three modules in Pyodide; the files

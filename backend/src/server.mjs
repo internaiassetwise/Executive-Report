@@ -20,6 +20,8 @@ export function createApiServer(handler, { port = 8000, maxFileSize = 25 * 1024 
       if (!path.startsWith('/') || path.startsWith('//')) { outgoing.writeHead(400); outgoing.end(); return; }
       const method = incoming.method || 'GET';
       const datasetUpload = method === 'POST' && path.split('?')[0] === '/api/datasets';
+      // Dashboard PDF requests carry chart pictures; everything else stays small.
+      const dashboardExport = method === 'POST' && /^\/api\/datasets\/[A-Za-z0-9_-]{32}\/export-dashboard$/.test(path.split('?')[0]);
       const rejectBody = (status, error) => {
         // Drain without buffering so a useful error reaches clients still uploading.
         // Destroying a socket with unread bytes instead produces ECONNRESET.
@@ -40,7 +42,7 @@ export function createApiServer(handler, { port = 8000, maxFileSize = 25 * 1024 
         }
         activeUploads++; reserved = true;
       }
-      const bodyLimit = datasetUpload ? maxFileSize + MULTIPART_OVERHEAD : 100_000;
+      const bodyLimit = datasetUpload ? maxFileSize + MULTIPART_OVERHEAD : dashboardExport ? 12 * 1024 * 1024 : 100_000;
       const oversized = () => rejectBody(413, datasetUpload
         ? { code: 'FILE_TOO_LARGE', message: 'ไฟล์มีขนาดเกินขีดจำกัดที่กำหนด' }
         : 'ข้อมูลคำขอมีขนาดใหญ่เกินไป');
@@ -80,7 +82,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (production && !process.env.ACCESS_PASSWORD) console.warn('ACCESS_PASSWORD is not set: all dataset requests are refused.');
   const aiDailyLimit = Number(process.env.AI_DAILY_REQUEST_LIMIT || 200);
   if (!Number.isSafeInteger(aiDailyLimit) || aiDailyLimit < 0) throw new Error('Invalid AI_DAILY_REQUEST_LIMIT');
-  const handler = createHandler({ apiKey: process.env.GEMINI_API_KEY || '', model: process.env.GEMINI_MODEL || DEFAULT_DATASET_MODEL, allowedOrigins, datasets, access, aiDailyLimit, legacyAi: process.env.LEGACY_AI_ENDPOINTS === 'true' });
+  const llmProvider = process.env.LLM_PROVIDER || 'gemini';
+  const handler = createHandler({
+    llmProvider, llmBaseUrl: process.env.LLM_BASE_URL || '',
+    apiKey: (llmProvider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.LLM_API_KEY) || '',
+    model: process.env.LLM_MODEL || process.env.GEMINI_MODEL || DEFAULT_DATASET_MODEL,
+    allowedOrigins, datasets, access, aiDailyLimit, legacyAi: process.env.LEGACY_AI_ENDPOINTS === 'true',
+  });
   const server = createApiServer(handler, { port, maxFileSize: datasets.maxFileSize, maxConcurrentUploads: datasets.maxConcurrent, allowedOrigins });
   server.listen(port, '0.0.0.0', () => console.log(`Backend ready on 0.0.0.0:${port}`));
   server.on('error', error => { console.error(`Backend could not listen (${error.code || 'unknown'}).`); process.exitCode = 1; });

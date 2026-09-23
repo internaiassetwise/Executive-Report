@@ -156,7 +156,12 @@ class DatasetTests(unittest.TestCase):
         self.assertTrue(result["sheets"][0]["warnings"])
         rows = preview(self.database, {"sheet": "s0"})["rows"]
         self.assertEqual(rows[-1]["values"]["c0"], "Total")
-        self.assertEqual(rows[-1]["values"]["c1"], "=SUM(B2:B3)")
+        # openpyxl saves no calculated result, so the formula cell is empty and
+        # disclosed; formula text never becomes a data value.
+        self.assertIsNone(rows[-1]["values"]["c1"])
+        warnings = " ".join(result["sheets"][0]["warnings"])
+        self.assertIn("ไม่มีค่าที่คำนวณไว้", warnings)
+        self.assertIn("ยอดรวม", warnings)
         self.assertTrue(preview(self.database, {"sheet": "s1"})["rows"][0]["values"]["c1"])
 
     def test_xlsx_invalid_sheet_rolls_back_other_sheets(self):

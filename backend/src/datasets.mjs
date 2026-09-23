@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { analyzeWithAi, DEFAULT_DATASET_MODEL } from './dataset-ai.mjs';
+import { renderDashboardHtml } from './dashboard-html.mjs';
+import { describeFilter, formatNumber } from '../../shared/dashboard-charts.mjs';
 
 const MiB = 1024 * 1024;
 export const MULTIPART_OVERHEAD = 64 * 1024;
@@ -84,6 +86,7 @@ async function boundedBody(request, limit) {
 const mimeTypes = {
   '.csv': new Set(['', 'text/csv', 'application/csv', 'text/plain', 'application/vnd.ms-excel', 'application/octet-stream']),
   '.xlsx': new Set(['', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/octet-stream']),
+  '.xls': new Set(['', 'application/vnd.ms-excel', 'application/x-msexcel', 'application/x-excel', 'application/octet-stream']),
 };
 
 export function createDatasetService(options = {}) {
@@ -143,6 +146,118 @@ export function createDatasetService(options = {}) {
     return promise;
   }
 
+  // Specs and profiles can exceed the Windows command-line limit, so the
+  // payload travels as a private file inside the job directory.
+  async function runDashboard(job, payload, signal, timeoutMs = config.previewTimeoutMs) {
+    const path = join(job.directory, `dashboard-${randomBytes(8).toString('hex')}.json`);
+    await writeFile(path, JSON.stringify(payload), { mode: 0o600, flag: 'wx' });
+    try { return await worker(job, ['dashboard', job.database, path], undefined, timeoutMs, signal); }
+    finally { await rm(path, { force: true }); }
+  }
+
+  async function jsonBody(request, limit) {
+    const body = request.body ? await boundedBody(request, limit) : Buffer.alloc(0);
+    let input = {};
+    try { if (body.length) input = JSON.parse(body.toString('utf8')); } catch { throw fail('INVALID_JSON', 'รูปแบบคำขอไม่ถูกต้อง'); }
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail('INVALID_JSON', 'รูปแบบคำขอไม่ถูกต้อง');
+    return input;
+  }
+
+  function parseFilters(value) {
+    if (value === undefined || value === null) return [];
+    if (!Array.isArray(value) || value.length > 12 || JSON.stringify(value).length > 16_000) throw fail('INVALID_FILTER', 'รูปแบบตัวกรองไม่ถูกต้อง');
+    return value;
+  }
+
+  async function queryDashboard(request, job) {
+    if (!job.analysis?.dashboard || job.status === 'processing') throw fail('ANALYSIS_NOT_READY', 'Dashboard ยังไม่พร้อม กรุณารอให้วิเคราะห์เสร็จ', 409);
+    const input = await jsonBody(request, 32_768);
+    const filters = parseFilters(input.filters);
+    if (activePreviews >= config.maxPreviews) throw fail('BUSY', 'กำลังคำนวณ Dashboard กรุณาลองอีกครั้งในอีกสักครู่', 429);
+    activePreviews++;
+    try { return reply(await runDashboard(job, { spec: job.analysis.dashboard, profiles: job.analysis.profiles, filters, include_options: input.options === true }, request.signal)); }
+    finally { activePreviews--; }
+  }
+
+  async function exportDashboard(request, job) {
+    if (!job.analysis?.dashboard || job.status === 'processing') throw fail('ANALYSIS_NOT_READY', 'Dashboard ยังไม่พร้อม กรุณารอให้วิเคราะห์เสร็จ', 409);
+    const input = await jsonBody(request, 12 * MiB);
+    if (!['html', 'pdf'].includes(input.format)) throw fail('INVALID_EXPORT', 'รองรับการส่งออก Dashboard เป็น HTML และ PDF เท่านั้น');
+    const filters = parseFilters(input.filters);
+    const images = input.format === 'pdf' ? chartImages(input.images, job.analysis.dashboard) : new Map();
+    if (activeExports >= config.maxExports) throw fail('BUSY', 'กำลังสร้างไฟล์ส่งออก กรุณาลองอีกครั้งในอีกสักครู่', 429);
+    activeExports++;
+    const created = [];
+    try {
+      const result = await runDashboard(job, { spec: job.analysis.dashboard, profiles: job.analysis.profiles, filters }, request.signal);
+      const document = dashboardDocument(job, result);
+      const base = sanitizeFilename(job.dataset.filename).replace(/\.[^.]+$/, '');
+      if (input.format === 'html') return download(Buffer.from(renderDashboardHtml(document), 'utf8'), `${base}-dashboard.html`, 'text/html; charset=utf-8');
+      for (const chart of document.charts) {
+        const bytes = images.get(chart.id);
+        if (!bytes) continue;
+        chart.image = join(job.directory, `chart-${randomBytes(8).toString('hex')}.jpg`);
+        await writeFile(chart.image, bytes, { mode: 0o600, flag: 'wx' });
+        created.push(chart.image);
+      }
+      const payload = join(job.directory, `pdf-${randomBytes(8).toString('hex')}.json`);
+      const output = join(job.directory, `dashboard-${randomBytes(8).toString('hex')}.pdf`);
+      created.push(payload, output);
+      await writeFile(payload, JSON.stringify(document), { mode: 0o600, flag: 'wx' });
+      const written = await worker(job, ['dashboard-pdf', payload, output], undefined, config.timeoutMs, request.signal, exportWorkerPath);
+      // Compare file identity, not strings: Python expands Windows short (8.3) path names.
+      const info = await lstat(output).catch(() => null);
+      if (!written || !info?.isFile() || info.isSymbolicLink() || info.size > 100 * MiB) throw fail('EXPORT_FAILED', 'สร้างไฟล์ PDF ไม่สำเร็จ', 500);
+      return download(await readFile(output), `${base}-dashboard.pdf`, 'application/pdf');
+    } finally {
+      activeExports--;
+      await Promise.all(created.map(path => rm(path, { force: true })));
+    }
+  }
+
+  /** Chart pictures from the browser are only decoration: JPEG, bounded, one per known chart. */
+  function chartImages(value, spec) {
+    const images = new Map();
+    if (value === undefined) return images;
+    if (!Array.isArray(value) || value.length > spec.charts.length) throw fail('INVALID_EXPORT', 'รูปกราฟสำหรับ PDF ไม่ถูกต้อง');
+    for (const item of value) {
+      const match = typeof item?.data === 'string' && /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(item.data);
+      if (!match || !spec.charts.some(chart => chart.id === item.id) || images.has(item.id)) throw fail('INVALID_EXPORT', 'รูปกราฟสำหรับ PDF ไม่ถูกต้อง');
+      const bytes = Buffer.from(match[1], 'base64');
+      if (bytes.length > 3 * MiB || bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) throw fail('INVALID_EXPORT', 'รูปกราฟสำหรับ PDF ไม่ถูกต้อง');
+      images.set(item.id, bytes);
+    }
+    return images;
+  }
+
+  /** Everything an exported dashboard shows, with numbers from the Python result only. */
+  function dashboardDocument(job, result) {
+    const spec = result.spec;
+    const profile = job.analysis.profiles.find(item => item.sheet_id === spec.sheet_id);
+    const column = key => profile.columns.find(item => item.key === key);
+    const values = new Map(result.kpis.map(item => [item.id, item.value]));
+    const charts = new Map(result.charts.map(item => [item.id, item]));
+    const ai = job.analysis.ai?.status === 'complete' ? job.analysis.ai : null;
+    const evidence = new Map(job.analysis.insights.map(item => [item.id, item]));
+    const insights = ai?.insights?.length
+      ? ai.insights.map(item => ({ title: item.title, description: item.description, evidence: item.evidence_ids.map(id => ({ id, method: evidence.get(id)?.evidence.method || '' })) }))
+      : job.analysis.insights.slice(0, 6).map(item => ({ title: item.title, description: item.description, evidence: [{ id: item.id, method: item.evidence.method }] }));
+    return {
+      title: spec.title, description: spec.description, source: spec.source, filename: job.dataset.filename, sheet: profile.sheet_name,
+      generated_at: new Date().toISOString(), rows_total: result.rows_total, rows_matched: result.rows_matched,
+      filters: result.filters.map(item => describeFilter(item, column(item.column))),
+      kpis: spec.kpis.map(kpi => ({ ...kpi, value: values.get(kpi.id) ?? null, text: formatNumber(values.get(kpi.id), column(kpi.column)?.meaning, kpi.agg) })),
+      charts: spec.charts.map(chart => ({ ...chart, x_name: column(chart.x)?.name || '', y_name: chart.y ? column(chart.y)?.name || '' : 'จำนวนแถว', meaning: chart.y ? column(chart.y)?.meaning || null : null, ...charts.get(chart.id) })),
+      insights, ai_summary: ai?.summary || '',
+    };
+  }
+
+  function download(bytes, name, type) {
+    const encodedName = encodeURIComponent(name).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+    const ascii = type.startsWith('text/html') ? 'dashboard.html' : 'dashboard.pdf';
+    return new Response(bytes, { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${ascii}"; filename*=UTF-8''${encodedName}`, 'Content-Length': String(bytes.length), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+  }
+
   async function removeJob(id) {
     const job = jobs.get(id);
     if (!job) return;
@@ -195,8 +310,22 @@ export function createDatasetService(options = {}) {
       advance(job, stage, 35 + Math.min(100, Math.max(0, event.progress)) * 0.35);
     }, config.timeoutMs, job.controller.signal), job.dataset);
     advance(job, 'ai', 75);
-    analysis.ai = await analyzeWithAi(job.dataset, analysis, { apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, objective, timeoutMs: config.aiTimeoutMs, signal: job.controller.signal, fetcher: config.fetcher || fetch, budget: config.aiBudget });
+    const ai = await analyzeWithAi(job.dataset, analysis, { llm: config.llm, apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, objective, timeoutMs: config.aiTimeoutMs, signal: job.controller.signal, fetcher: config.fetcher || fetch, budget: config.aiBudget });
     if (!jobs.has(job.id)) return;
+    advance(job, 'dashboard', 88);
+    const { dashboard: proposal, ...prose } = ai;
+    analysis.ai = prose;
+    // The AI plan replaces the rule-based plan only after Python validates it
+    // against the real column roles; otherwise the rule-based plan stays.
+    if (proposal) {
+      try {
+        analysis.dashboard = (await runDashboard(job, { spec: proposal, profiles: analysis.profiles }, job.controller.signal)).spec;
+        analysis.ai.dashboard = 'accepted';
+      } catch (error) {
+        if (job.controller.signal.aborted) throw error;
+        analysis.ai.dashboard = 'rejected';
+      }
+    }
     advance(job, 'dashboard', 90);
     if (analysis.ai.status === 'complete') {
       const executive = analysis.report.sections.find(section => section.id === 'executive_summary');
@@ -244,13 +373,16 @@ export function createDatasetService(options = {}) {
       const file = entries[0][1];
       const filename = sanitizeFilename(file.name);
       const extension = extname(filename).toLowerCase();
-      if (!Object.hasOwn(mimeTypes, extension)) throw fail('UNSUPPORTED_FORMAT', 'รองรับเฉพาะไฟล์ .csv และ .xlsx', 415);
+      if (!Object.hasOwn(mimeTypes, extension)) throw fail('UNSUPPORTED_FORMAT', 'รองรับเฉพาะไฟล์ .csv, .xlsx และ .xls', 415);
       if (!mimeTypes[extension].has(file.type.toLowerCase())) throw fail('INVALID_MIME_TYPE', 'ชนิดข้อมูลในไฟล์ไม่ตรงกับนามสกุล CSV/XLSX', 415);
       if (file.size === 0) throw fail('EMPTY_FILE', 'ไฟล์ว่าง กรุณาเลือกไฟล์ที่มีข้อมูล');
       if (file.size > config.maxFileSize) throw fail('FILE_TOO_LARGE', 'ไฟล์มีขนาดเกินขีดจำกัดที่กำหนด', 413);
       const data = Buffer.from(await file.arrayBuffer());
       const zip = data.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
-      if ((extension === '.xlsx' && !zip) || (extension === '.csv' && zip)) throw fail('INVALID_FILE', 'เนื้อหาไฟล์ไม่ตรงกับนามสกุล หรือไฟล์เสียหาย');
+      const ole = data.subarray(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]));
+      // Many systems export HTML or XML with an .xls name; say so instead of a vague parse error.
+      if (extension === '.xls' && !ole) throw fail('INVALID_FILE', zip ? 'ไฟล์นี้เป็น Excel รุ่นใหม่ กรุณาเปลี่ยนนามสกุลเป็น .xlsx แล้วอัปโหลดใหม่' : 'ไฟล์ .xls นี้ไม่ใช่รูปแบบ Excel 97-2003 จริง กรุณาเปิดใน Excel แล้วบันทึกเป็น .xlsx ก่อนอัปโหลด');
+      if ((extension === '.xlsx' && !zip) || (extension === '.csv' && (zip || ole))) throw fail('INVALID_FILE', 'เนื้อหาไฟล์ไม่ตรงกับนามสกุล หรือไฟล์เสียหาย');
       if (closed) throw fail('UNAVAILABLE', 'เซิร์ฟเวอร์กำลังปิด กรุณาลองอีกครั้ง', 503);
       const root = await getRoot();
       directory = await mkdtemp(join(root, 'dataset-'));
@@ -346,7 +478,14 @@ export function createDatasetService(options = {}) {
     if (!['asc', 'desc'].includes(direction)) throw fail('INVALID_SORT', 'ลำดับการเรียงข้อมูลไม่ถูกต้อง');
     const search = query.get('search') || '';
     if (search.length > 500) throw fail('INVALID_SEARCH', 'คำค้นหาต้องไม่เกิน 500 ตัวอักษร');
-    return { sheet: sheet.id, page, page_size: pageSize, sort, column, direction, search };
+    const rawFilters = query.get('filters');
+    if (rawFilters && rawFilters.length > 16_000) throw fail('INVALID_FILTER', 'ตัวกรองยาวเกินไป');
+    let filters = [];
+    try { filters = parseFilters(rawFilters ? JSON.parse(rawFilters) : []); } catch (error) { throw error instanceof DatasetError ? error : fail('INVALID_FILTER', 'รูปแบบตัวกรองไม่ถูกต้อง'); }
+    // Pass column roles for date/number filters; the worker validates keys against the sheet.
+    const profile = job.analysis?.profiles.find(item => item.sheet_id === sheet.id);
+    const columns = Object.fromEntries(filters.map(item => profile?.columns.find(entry => entry.key === item?.column)).filter(Boolean).map(entry => [entry.key, { role: entry.role, ...(entry.time_format ? { time_format: entry.time_format } : {}) }]));
+    return { sheet: sheet.id, page, page_size: pageSize, sort, column, direction, search, ...(filters.length ? { filters, columns } : {}) };
   }
 
   async function route(request) {
@@ -356,13 +495,13 @@ export function createDatasetService(options = {}) {
       const origin = request.headers.get('origin');
       if ((origin !== null || !['GET', 'HEAD'].includes(request.method)) && !allowedOrigins.has(origin)) throw fail('ORIGIN_NOT_ALLOWED', 'Origin not allowed', 403);
       if (url.pathname === '/api/datasets/config' && request.method === 'GET') {
-        return reply({ max_file_size: config.maxFileSize, accepted_extensions: ['.csv', '.xlsx'], ...limits, retention_minutes: config.retentionMinutes, auto_analyze: config.autoAnalyze, ai: { configured: Boolean(config.apiKey), model: config.model || DEFAULT_DATASET_MODEL } });
+        return reply({ max_file_size: config.maxFileSize, accepted_extensions: ['.csv', '.xlsx', '.xls'], ...limits, retention_minutes: config.retentionMinutes, auto_analyze: config.autoAnalyze, ai: { configured: Boolean(config.llm || config.apiKey), model: config.llm?.model || config.model || DEFAULT_DATASET_MODEL } });
       }
       if (url.pathname === '/api/datasets') {
         if (request.method === 'POST') { await sweep(); return await upload(request); }
         throw fail('METHOD_NOT_ALLOWED', 'Method not allowed', 405);
       }
-      const match = /^\/api\/datasets\/([A-Za-z0-9_-]{32})(\/(?:rows|analyze|export))?$/.exec(url.pathname);
+      const match = /^\/api\/datasets\/([A-Za-z0-9_-]{32})(\/(?:rows|analyze|export|dashboard|export-dashboard))?$/.exec(url.pathname);
       if (!match) throw fail('NOT_FOUND', 'ไม่พบชุดข้อมูล', 404);
       const id = match[1];
       const job = jobs.get(id);
@@ -370,6 +509,8 @@ export function createDatasetService(options = {}) {
       if (!job || !jobs.has(id)) throw fail('DATASET_EXPIRED', 'ไม่พบชุดข้อมูล หรือไฟล์ชั่วคราวหมดอายุแล้ว กรุณาอัปโหลดใหม่', 404);
       if (!match[2] && request.method === 'DELETE') { await removeJob(id); return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } }); }
       if (match[2] === '/analyze' && request.method === 'POST') return await reanalyze(request, job);
+      if (match[2] === '/dashboard' && request.method === 'POST') return await queryDashboard(request, job);
+      if (match[2] === '/export-dashboard' && request.method === 'POST') return await exportDashboard(request, job);
       if (request.method !== 'GET') throw fail('METHOD_NOT_ALLOWED', 'Method not allowed', 405);
       if (!match[2]) return reply({ id, status: job.status, stage: job.stage, progress: job.progress, ...(job.dataset ? { dataset: job.dataset } : {}), ...(job.analysis ? { analysis: job.analysis } : {}), ...(job.error ? { error: job.error } : {}) });
       if (match[2] === '/export') return await exportDataset(request, url, job);

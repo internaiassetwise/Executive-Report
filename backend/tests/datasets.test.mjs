@@ -63,7 +63,7 @@ test('configuration uses validated environment limits and exposes no credentials
   const { handle } = await context(t, { maxFileSize: 1234 });
   const response = await handle(request('/config'));
   const body = await response.json();
-  assert.deepEqual(body, { max_file_size: 1234, accepted_extensions: ['.csv', '.xlsx'], max_rows: 100000, max_columns: 200, max_cells: 2000000, retention_minutes: 60, auto_analyze: false, ai: { configured: false, model: 'gemini-3-flash-preview' } });
+  assert.deepEqual(body, { max_file_size: 1234, accepted_extensions: ['.csv', '.xlsx', '.xls'], max_rows: 100000, max_columns: 200, max_cells: 2000000, retention_minutes: 60, auto_analyze: false, ai: { configured: false, model: 'gemini-3-flash-preview' } });
   assert.equal(response.headers.get('cache-control'), 'no-store');
 });
 

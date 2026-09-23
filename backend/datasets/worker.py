@@ -28,6 +28,8 @@ DEFAULT_LIMITS = {
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z")
 ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}.*)?\Z")
+TOTAL_ROW = re.compile(r"(?:grand\s+)?(?:sub\s*-?\s*)?totals?|รวม(?:ทั้งสิ้น|ทั้งหมด)?|ยอดรวม(?:ทั้งสิ้น)?|รวมยอด", re.I)
+EXCEL_ERROR = re.compile(r"#(?:DIV/0!|N/A|NAME\?|NULL!|NUM!|REF!|VALUE!|SPILL!|CALC!)")
 
 
 class DatasetError(Exception):
@@ -213,26 +215,50 @@ def validate_sheet_coordinates(source):
             element.clear()
 
 
-def xlsx_rows(sheet):
+def xlsx_rows(sheet, formula_sheet, uncached):
+    """Yield the values Excel last calculated. Formulas are never evaluated here;
+    a formula cell without a saved result is stored empty and counted in `uncached`."""
+    import itertools
     # Ignore inaccurate worksheet dimensions, including styled empty tails.
     sheet.reset_dimensions()
-    for index, cells in enumerate(sheet.iter_rows(), 1):
+    formula_sheet.reset_dimensions()
+    for index, (cells, formula_cells) in enumerate(itertools.zip_longest(sheet.iter_rows(), formula_sheet.iter_rows(), fillvalue=()), 1):
         values = []
         formulas = 0
-        for cell in cells:
-            value = cell.value
-            if cell.data_type == "e":
-                fail("UNSUPPORTED_VALUE", f"ชีต {sheet.title} แถว {index}: พบเซลล์ข้อผิดพลาด Excel กรุณาแก้ไขแล้วอัปโหลดใหม่")
-            if cell.data_type == "f":
-                if not isinstance(value, str):
-                    value = getattr(value, "text", None)
-                if not isinstance(value, str):
-                    fail("UNSUPPORTED_VALUE", f"ชีต {sheet.title} แถว {index}: สูตรชนิดนี้ไม่มีข้อความที่อ่านได้ กรุณาบันทึกเป็นค่า")
+        for cell, source in itertools.zip_longest(cells, formula_cells):
+            value = cell.value if cell is not None else None
+            if cell is not None and cell.data_type == "e" or isinstance(value, str) and EXCEL_ERROR.fullmatch(value):
+                value = None
+                uncached["errors"] = uncached.get("errors", 0) + 1
+            if source is not None and source.data_type == "f":
                 formulas += 1
+                if value is None:
+                    uncached[sheet.title] = uncached.get(sheet.title, 0) + 1
             values.append(value)
         while values and blank(values[-1]):
             values.pop()
         yield index, values, formulas
+
+
+def xls_rows(book, sheet):
+    import xlrd
+    for index in range(sheet.nrows):
+        values = []
+        for cell in sheet.row(index):
+            if cell.ctype == xlrd.XL_CELL_DATE:
+                value = xlrd.xldate_as_datetime(cell.value, book.datemode)
+                values.append(value.date() if value.time() == datetime.min.time() else value)
+            elif cell.ctype == xlrd.XL_CELL_NUMBER:
+                values.append(int(cell.value) if float(cell.value).is_integer() and abs(cell.value) <= MAX_SAFE_INTEGER else cell.value)
+            elif cell.ctype == xlrd.XL_CELL_BOOLEAN:
+                values.append(bool(cell.value))
+            elif cell.ctype == xlrd.XL_CELL_TEXT:
+                values.append(cell.value)
+            else:
+                values.append(None)
+        while values and blank(values[-1]):
+            values.pop()
+        yield index + 1, values, 0
 
 
 def resolve_sheet_header(iterator, sheet_name, limits):
@@ -294,23 +320,35 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None)
     progress = progress or (lambda stage, value: None)
     progress("validating", 20)
     extension = Path(filename).suffix.casefold()
-    if extension not in (".csv", ".xlsx"):
-        fail("UNSUPPORTED_FORMAT", "รองรับไฟล์ CSV และ XLSX เท่านั้น")
+    if extension not in (".csv", ".xlsx", ".xls"):
+        fail("UNSUPPORTED_FORMAT", "รองรับไฟล์ CSV, XLSX และ XLS เท่านั้น")
     if not input_path.is_file() or not input_path.stat().st_size:
         fail("EMPTY_FILE", "ไฟล์ว่าง กรุณาเลือกไฟล์ที่มีหัวคอลัมน์และแถวข้อมูล")
     if sqlite_path.exists():
         fail("INVALID_REQUEST", "พื้นที่เก็บข้อมูลชุดนี้มีอยู่แล้ว กรุณาเริ่มการอัปโหลดใหม่")
     book = None
+    formula_book = None
     connection = None
     succeeded = False
+    uncached = {}
     try:
         if extension == ".xlsx":
             xlsx_preflight(input_path, limits)
             import openpyxl
-            book = openpyxl.load_workbook(input_path, read_only=True, data_only=False, keep_links=False)
+            book = openpyxl.load_workbook(input_path, read_only=True, data_only=True, keep_links=False)
+            formula_book = openpyxl.load_workbook(input_path, read_only=True, data_only=False, keep_links=False)
             if len(book.worksheets) > limits["max_sheets"]:
                 fail("LIMIT_EXCEEDED", f"สมุดงานมีชีตเกินขีดจำกัด {limits['max_sheets']} ชีต กรุณาแบ่งไฟล์")
-            sources = [(sheet.title, xlsx_rows(sheet), sheet.sheet_state) for sheet in book.worksheets]
+            sources = [(sheet.title, xlsx_rows(sheet, formulas, uncached), sheet.sheet_state) for sheet, formulas in zip(book.worksheets, formula_book.worksheets)]
+        elif extension == ".xls":
+            import xlrd
+            book = xlrd.open_workbook(str(input_path), on_demand=True)
+            if book.nsheets > limits["max_sheets"]:
+                fail("LIMIT_EXCEEDED", f"สมุดงานมีชีตเกินขีดจำกัด {limits['max_sheets']} ชีต กรุณาแบ่งไฟล์")
+            sheets = [book.sheet_by_index(index) for index in range(book.nsheets)]
+            if sum(sheet.nrows * sheet.ncols for sheet in sheets) > limits["max_cells"] * 2:
+                fail("LIMIT_EXCEEDED", f"จำนวนเซลล์ข้อมูลรวมเกิน {limits['max_cells']:,} เซลล์ กรุณาแบ่งไฟล์")
+            sources = [(sheet.name, xls_rows(book, sheet), "visible" if sheet.visibility == 0 else "hidden") for sheet in sheets]
         else:
             sources = [("CSV", csv_rows(input_path), "visible")]
         progress("reading", 35)
@@ -329,6 +367,7 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None)
             kinds = [set() for _ in names]
             rows_count = 0
             formulas_count = 0
+            total_rows = []
             sheet_id = f"s{len(result['sheets'])}"
             connection.execute(f'CREATE TABLE "data_{sheet_id}" (row_number INTEGER PRIMARY KEY, data TEXT NOT NULL)')
 
@@ -348,6 +387,9 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None)
                 total_cells += len(names)
                 if total_cells > limits["max_cells"]:
                     fail("LIMIT_EXCEEDED", f"จำนวนเซลล์ข้อมูลรวมเกิน {limits['max_cells']:,} เซลล์ กรุณาแบ่งไฟล์")
+                first = next((value for value in values if not blank(value)), None)
+                if isinstance(first, str) and TOTAL_ROW.fullmatch(first.strip()):
+                    total_rows.append(row_number)
                 record = {}
                 for index in range(len(names)):
                     value, kind = normalize(values[index] if index < len(values) else None, f"ชีต {sheet_name} แถว {row_number} คอลัมน์ {index + 1}")
@@ -366,7 +408,11 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None)
             if blank_rows:
                 warnings.append(f"ข้ามแถวว่าง {blank_rows:,} แถว โดยคงเลขแถวต้นฉบับไว้")
             if formulas_count:
-                warnings.append(f"เก็บสูตร {formulas_count:,} เซลล์เป็นข้อความ ไม่ประมวลผลหรือคำนวณสูตร Excel")
+                warnings.append(f"ใช้ค่าที่ Excel คำนวณไว้ล่าสุดของสูตร {formulas_count:,} เซลล์ ระบบไม่คำนวณสูตรใหม่")
+            if uncached.get(sheet_name):
+                warnings.append(f"สูตร {uncached[sheet_name]:,} เซลล์ไม่มีค่าที่คำนวณไว้ จึงเก็บเป็นค่าว่าง กรุณาเปิดไฟล์ใน Excel แล้วบันทึกใหม่ก่อนอัปโหลด")
+            if total_rows:
+                warnings.append(f"พบแถวที่อาจเป็นยอดรวม {len(total_rows):,} แถว (แถว {', '.join(map(str, total_rows[:5]))}) ผลรวมใน Dashboard จะนับแถวเหล่านี้ด้วย หากไม่ต้องการให้ลบแถวสรุปออกจากไฟล์ก่อนอัปโหลด")
             if visibility != "visible":
                 warnings.append("ชีตนี้ถูกซ่อนในไฟล์ต้นฉบับและรวมอยู่ในข้อมูลที่อ่านแล้ว")
             for column, types in zip(columns, kinds):
@@ -375,6 +421,8 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None)
             result["rows_count"] += rows_count
             result["columns_count"] += len(columns)
             progress("reading", 35 + int((source_index + 1) / len(sources) * 35))
+        if uncached.get("errors"):
+            result["warnings"].append(f"พบเซลล์ข้อผิดพลาดของสูตร Excel (เช่น #DIV/0!) {uncached['errors']:,} เซลล์ เก็บเป็นค่าว่างและไม่นำมาคำนวณ")
         if not result["sheets"]:
             fail("EMPTY_DATASET", "ไม่พบแถวข้อมูล กรุณาเลือกไฟล์ที่มีหัวคอลัมน์และข้อมูลอย่างน้อยหนึ่งแถว")
         progress("detecting_types", 80)
@@ -396,8 +444,9 @@ def ingest(input_path, sqlite_path, filename, limits_values=None, progress=None)
     except Exception:
         fail("INVALID_FILE", "ไม่สามารถอ่านสมุดงานได้ กรุณาตรวจโครงสร้างหรือเปิดไฟล์ใน Excel แล้วบันทึกใหม่")
     finally:
-        if book is not None:
-            book.close()
+        for workbook in (book, formula_book):
+            if workbook is not None:
+                (workbook.release_resources if hasattr(workbook, "release_resources") else workbook.close)()
         if connection is not None:
             connection.close()
         if not succeeded and connection is not None:
@@ -439,11 +488,19 @@ def preview(sqlite_path, query):
             fail("INVALID_REQUEST", "ไม่พบคอลัมน์ที่ระบุ กรุณาเลือกคอลัมน์จากรายการ")
         keys = [column] if column else list(columns)
         where, params = "", []
+        filters = query.get("filters") or []
+        if filters:
+            from dashboard import filter_clause
+            semantics = query.get("columns") if isinstance(query.get("columns"), dict) else {}
+            known = {key: {**value, **{field: semantics[key][field] for field in ("role", "time_format") if isinstance(semantics.get(key), dict) and field in semantics[key]}} for key, value in columns.items()}
+            clause, filter_params = filter_clause(known, filters)
+            where, params = f" WHERE ({clause})", filter_params
         if search:
             def search_expression(key):
                 return f"CASE json_type(data, '$.{key}') WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' ELSE casefold(json_extract(data, '$.{key}')) END"
-            where = " WHERE " + " OR ".join(f"instr({search_expression(key)}, ?) > 0" for key in keys)
-            params = [search.casefold()] * len(keys)
+            matches = " OR ".join(f"instr({search_expression(key)}, ?) > 0" for key in keys)
+            where = f"{where} AND ({matches})" if where else f" WHERE ({matches})"
+            params = [*params, *[search.casefold()] * len(keys)]
         order = "row_number ASC"
         if sort:
             expression = f"json_extract(data, '$.{sort}')"
@@ -480,6 +537,9 @@ def main():
             result = ingest(sys.argv[2], sys.argv[3], sys.argv[4], json.loads(sys.argv[5]), lambda stage, progress: emit({"stage": stage, "progress": progress}))
         elif len(sys.argv) == 4 and sys.argv[1] == "preview":
             result = preview(sys.argv[2], json.loads(sys.argv[3]))
+        elif len(sys.argv) == 4 and sys.argv[1] == "dashboard":
+            from dashboard import run
+            result = run(sys.argv[2], json.loads(Path(sys.argv[3]).read_text(encoding="utf-8")))
         elif len(sys.argv) == 3 and sys.argv[1] == "analyze":
             from analyzer import analyze
             result = analyze(sys.argv[2], lambda stage, progress: emit({"stage": stage, "progress": progress}))

@@ -392,6 +392,8 @@ def report_sections(analysis, dataset):
 
 def analyze(sqlite_path, progress=None):
     from worker import DatasetError
+    from dashboard import plan
+    from semantics import annotate
     progress = progress or (lambda stage, value: None)
     if not Path(sqlite_path).is_file():
         raise DatasetError("NOT_FOUND", "ไม่พบชุดข้อมูล กรุณาอัปโหลดใหม่")
@@ -406,6 +408,7 @@ def analyze(sqlite_path, progress=None):
         for index, sheet in enumerate(dataset["sheets"]):
             progress("profiling", 40 + int(index / len(dataset["sheets"]) * 35))
             profile, counters, numeric, dates = scan_profile(connection, sheet, top_limit)
+            annotate(profile, numeric, dates, counters, likely_identifier)
             progress("patterns", 40 + int((index + .5) / len(dataset["sheets"]) * 35))
             sheet_findings, sheet_charts, sheet_kpis = sheet_patterns(connection, sheet, profile, counters, numeric, dates)
             profiles.append(profile)
@@ -437,6 +440,10 @@ def analyze(sqlite_path, progress=None):
                   "kpis": selected_kpis, "insights": selected_findings, "profiles": profiles, "charts": selected_charts}
         progress("report", 95)
         result["report"] = {"sections": report_sections(result, dataset)}
+        try:
+            result["dashboard"] = plan(profiles)
+        except DatasetError:
+            result["dashboard"] = None
         json.dumps(result, ensure_ascii=False, allow_nan=False)
         return result
     finally:

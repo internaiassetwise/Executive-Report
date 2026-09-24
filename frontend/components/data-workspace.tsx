@@ -46,6 +46,7 @@ export function DataWorkspace() {
   const [config, setConfig] = useState<DatasetConfig | null>(null);
   const [configError, setConfigError] = useState('');
   const [file, setFile] = useState<File | null>(null);
+  const [objective, setObjective] = useState('');
   const [job, setJob] = useState<DatasetJob | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
@@ -149,7 +150,7 @@ export function DataWorkspace() {
       const accepted = await pendingUpload.current?.catch(() => null);
       if (accepted && accepted.id !== activeId.current) await removeDataset(accepted.id);
       if (activeId.current) await removeDataset(activeId.current);
-      activeId.current = null; remember(null); setJob(null); setFile(null); setPollError('');
+      activeId.current = null; remember(null); setJob(null); setFile(null); setObjective(''); setPollError('');
       if (input.current) input.current.value = '';
     } catch (reason) { setError(message(reason)); }
     finally { setDeleting(false); setUploading(false); }
@@ -164,7 +165,7 @@ export function DataWorkspace() {
       if (activeId.current) await removeDataset(activeId.current);
       if (operation !== activeOperation.current) return;
       activeId.current = null; remember(null); setJob(null);
-      pendingUpload.current = uploadDataset(file, setUploadPercent, controller.signal);
+      pendingUpload.current = uploadDataset(file, objective, setUploadPercent, controller.signal);
       const created = await pendingUpload.current;
       // clearDataset owns cancellation cleanup and waits for this same promise.
       if (operation !== activeOperation.current) return;
@@ -173,12 +174,12 @@ export function DataWorkspace() {
     finally { pendingUpload.current = null; if (operation === activeOperation.current) setUploading(false); }
   }
 
-  async function reanalyze(objective: string) {
+  async function reanalyze(requestedObjective: string) {
     if (!job || retrying) return;
     const operation = activeOperation.current;
     setRetrying(true); setError('');
     try {
-      const result = await analyzeDataset(job.id, objective);
+      const result = await analyzeDataset(job.id, requestedObjective || objective);
       if (operation === activeOperation.current) setJob(result);
     } catch (reason) { if (operation === activeOperation.current) setError(message(reason)); }
     finally { setRetrying(false); }
@@ -237,6 +238,11 @@ export function DataWorkspace() {
               <div><strong>{file.name}</strong><span>{sizeLabel(file.size)}</span></div>
               <button className="data-icon-button" aria-label="นำไฟล์ออก" onClick={() => { setFile(null); setError(''); }}><X size={18} /></button>
             </div>}
+            <div className="office-objective">
+              <label htmlFor="analysis-objective">อยากให้วิเคราะห์เรื่องอะไร <span>(ไม่บังคับ)</span></label>
+              <textarea id="analysis-objective" value={objective} maxLength={1000} rows={3} onChange={event => setObjective(event.target.value)} aria-describedby="analysis-objective-hint" placeholder="เช่น รายการ BOQ ที่ต่อรองได้สูงสุด หรือค่าใช้จ่ายที่สูงผิดปกติ" />
+              <p id="analysis-objective-hint">ใช้เป็นโจทย์สำหรับบทวิเคราะห์เมื่อเปิดใช้ AI · {objective.length}/1,000 ตัวอักษร</p>
+            </div>
             <div className="office-actions">
               <button className="office-button primary large" disabled={!file || !config || deleting} onClick={() => void start()}>2. สร้าง Dashboard <ArrowRight size={17} /></button>
             </div>

@@ -155,7 +155,7 @@ function evidenceCorpus(analysis) {
   return analysis.insights.map(item => ({ evidence_id: item.id, finding: `${item.title} ${item.description} ${JSON.stringify(item.evidence.value)}`, method: item.evidence.method }));
 }
 
-function signedGrounded(text, evidence) {
+export function signedGrounded(text, evidence) {
   const withoutCitations = value => String(value).replace(/\bEV-\d+\b/gi, ' ').replace(/\u2212/g, '-');
   const claims = withoutCitations(text);
   if (/\p{N}/u.test(claims.replace(/[0-9]/g, ''))) return false;

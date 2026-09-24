@@ -3,7 +3,7 @@
 import { Component, lazy, Suspense, useRef, useState, type ReactNode } from 'react';
 import { BarChart3, Download, FileCode2, FileSpreadsheet, FileText, Info, LoaderCircle, Printer } from 'lucide-react';
 import { DashboardView } from '@/components/dashboard-view';
-import { DocumentDashboard } from '@/components/document-dashboard';
+import { DocumentDashboard, DocumentFocus } from '@/components/document-dashboard';
 import { exportDataset, type Dataset, type DatasetJob, type DocumentInfo } from '@/lib/datasets';
 import type { DatasetAnalysis, DatasetChart as Chart } from '@/lib/dataset-analysis';
 
@@ -99,7 +99,7 @@ export function DatasetResults({ id, dataset, analysis, boq, document, onAnalyze
       {analysis.charts.length > 0 && <div className="insight-chart-grid">{analysis.charts.map(chart => <ChartPanel key={chart.id} chart={chart} />)}</div>}
     </>}
 
-    {tab === 'report' && (boq || construction?.has_report) && <DocumentReport id={id} title={reportTitle} filename={dataset.filename} />}
+    {tab === 'report' && (boq || construction?.has_report) && <><DocumentFocus focus={construction?.focus} compact /><DocumentReport id={id} title={reportTitle} filename={dataset.filename} /></>}
     {tab === 'report' && !boq && !construction?.has_report && analysis && <>
       <div className="office-commandbar"><span>รายงานสรุปผลการวิเคราะห์ (A4)</span><div>
         <button className="office-button" disabled={Boolean(exporting)} onClick={() => void download('xlsx')}>{exporting === 'xlsx' ? <LoaderCircle size={15} className="data-spin" /> : <FileSpreadsheet size={15} />}ดาวน์โหลด Excel</button>

@@ -6,6 +6,8 @@ React presents one workflow and four result views. Node handles HTTP/job lifecyc
 
 Upload one CSV/XLSX → validate/parse all worksheets → store SQLite → compute profiles and evidence → one Gemini reasoning request → validate typed output → publish Dashboard/Report → export on demand.
 
+For construction cost documents, the computed BOQ dashboard and A4 report remain the source of all figures. When an upload includes an `objective`, one additional provider request selects and explains relevant precomputed BOQ facts. The response is checked against the selected figures and appears in the dashboard and on a final printable report page. If AI is unavailable or cannot ground the answer, the original BOQ report remains usable and the dashboard shows that status.
+
 The backend returns actual stage changes. Parsing occupies the early progress range, profiling/analysis the middle, followed by AI and report assembly. A ready job reaches100 only when its usable result is available. AI failure preserves computed results and is disclosed in `analysis.ai`.
 
 ## API
@@ -13,7 +15,7 @@ The backend returns actual stage changes. Parsing occupies the early progress ra
 | Method | Path | Result |
 | --- | --- | --- |
 | GET | `/api/datasets/config` | Accepted types, limits, retention, `auto_analyze`, `ai.configured`, `ai.model` |
-| POST | `/api/datasets` | Exactly one multipart `file`;202 with job ID |
+| POST | `/api/datasets` | Exactly one multipart `file`, optional text `objective` (up to 1000 characters); 202 with job ID |
 | GET | `/api/datasets/{id}` | Status, stage, progress, dataset metadata, analysis and optional error |
 | GET | `/api/datasets/{id}/rows` | Paginated/searchable/sortable sheet data |
 | POST | `/api/datasets/{id}/analyze` | Reanalyze stored data; optional JSON `objective` up to1000 characters |

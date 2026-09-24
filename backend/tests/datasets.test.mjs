@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
-import { mkdtemp, readdir, rmdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rmdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -25,13 +25,14 @@ async function context(t, overrides = {}) {
 function request(path = '', options = {}) {
   return new Request(`http://localhost:8000/api/datasets${path}`, options);
 }
-function fileRequest(content, filename = 'data.csv', type = 'text/csv', requestOrigin = origin) {
+function fileRequest(content, filename = 'data.csv', type = 'text/csv', requestOrigin = origin, objective) {
   const form = new FormData();
   form.append('file', new Blob([content], { type }), filename);
+  if (objective !== undefined) form.append('objective', objective);
   return request('', { method: 'POST', headers: requestOrigin ? { Origin: requestOrigin } : {}, body: form });
 }
-async function upload(handle, content, filename, type) {
-  const response = await handle(fileRequest(content, filename, type));
+async function upload(handle, content, filename, type, objective) {
+  const response = await handle(fileRequest(content, filename, type, origin, objective));
   const body = await response.json();
   assert.equal(response.status, 202, JSON.stringify(body));
   assert.match(body.id, /^[A-Za-z0-9_-]{32}$/);
@@ -273,4 +274,45 @@ test('automatic analysis completes computed dashboard/report without a provider 
   const retry = await handle(request(`/${id}/analyze`, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ objective: 'ตรวจคุณภาพข้อมูลและการกระจาย' }) }));
   assert.equal(retry.status, 202);
   assert.equal((await finish(handle, id)).analysis.ai.status, 'unavailable');
+});
+
+test('upload objective reaches the first AI analysis and rejects oversized text', async t => {
+  const seen = [];
+  const llm = { name: 'fake', model: 'fake', async generateJson(input) {
+    if (input.schema.properties.sheets) return { data: { sheets: [] }, usage: {} };
+    seen.push(JSON.parse(input.prompt).objective);
+    return { data: { summary: '', insights: [], recommendations: [] }, usage: {} };
+  } };
+  const { handle } = await context(t, { autoAnalyze: true, llm });
+  const invalid = await handle(fileRequest('team,amount\nNorth,10\n', 'data.csv', 'text/csv', origin, 'x'.repeat(1001)));
+  assert.equal(invalid.status, 400);
+  assert.equal((await invalid.json()).error.code, 'INVALID_OBJECTIVE');
+  const id = await upload(handle, 'team,amount\nNorth,10\nSouth,20\n', 'data.csv', 'text/csv', 'ตรวจแนวโน้มค่าใช้จ่าย');
+  assert.equal((await finish(handle, id)).status, 'ready');
+  assert.deepEqual(seen, ['ตรวจแนวโน้มค่าใช้จ่าย']);
+});
+
+test('BOQ objective appears in focused dashboard result and printable report', async t => {
+  const calls = [];
+  const llm = { name: 'fake', model: 'fake', async generateJson(input) {
+    if (input.schema.properties.sheets) return { data: { sheets: [] }, usage: {} };
+    const prompt = JSON.parse(input.prompt);
+    calls.push(prompt);
+    return { data: { status: 'complete', summary: prompt.facts[0].statement, evidence_ids: [prompt.facts[0].id] }, usage: {} };
+  } };
+  const { handle } = await context(t, { autoAnalyze: true, llm });
+  const bytes = await readFile(new URL('./fixtures/excel/cost_estimate.xlsx', import.meta.url));
+  const id = await upload(handle, bytes, 'cost_estimate.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'เน้นมูลค่ารวม');
+  const job = await finish(handle, id);
+  assert.equal(job.status, 'ready', JSON.stringify(job.error));
+  assert.equal(job.document.type, 'estimate');
+  assert.equal(job.document.focus.status, 'complete');
+  assert.equal(job.document.focus.objective, 'เน้นมูลค่ารวม');
+  assert.equal(calls.length, 1, 'one focused BOQ request follows the layout request');
+  const report = await handle(request(`/${id}/boq-report`));
+  assert.equal(report.status, 200);
+  const html = await report.text();
+  assert.match(html, /เน้นมูลค่ารวม/);
+  assert.match(html, /วิเคราะห์ตามโจทย์ที่ระบุ/);
+  assert.match(html, /หน้า \d+ \/ \d+/);
 });

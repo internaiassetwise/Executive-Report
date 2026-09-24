@@ -8,6 +8,7 @@ import { analyzeWithAi, DEFAULT_DATASET_MODEL } from './dataset-ai.mjs';
 import { renderDashboardHtml } from './dashboard-html.mjs';
 import { describeImages } from './image-ai.mjs';
 import { planLayouts } from './layout-ai.mjs';
+import { analyzeDocumentFocus, renderFocusedReportHtml } from './document-focus.mjs';
 import { describeFilter, formatNumber } from '../../shared/dashboard-charts.mjs';
 
 const MiB = 1024 * 1024;
@@ -351,13 +352,13 @@ export function createDatasetService(options = {}) {
       advance(job, stage, 35 + Math.min(100, Math.max(0, event.progress)) * 0.35);
     }, config.timeoutMs, job.controller.signal), job.dataset);
     advance(job, 'ai', 75);
-    // A BOQ comparison has its own fixed report; every other file gets a report written for its content.
-    // Construction cost documents have their own computed dashboard and report, so no
-    // model call is spent on them; every other file gets a report written for its content.
+    // Construction documents keep their computed dashboard and report. A supplied
+    // objective adds a separate focused reading of those computed BOQ facts.
     const construction = job.document && job.document.type !== 'general';
     const ai = construction
       ? { model: '', summary: '', insights: [], recommendations: [], status: 'skipped', message: '' }
       : await analyzeWithAi(job.dataset, analysis, { llm: config.llm, apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, objective, timeoutMs: config.aiTimeoutMs, signal: job.controller.signal, fetcher: config.fetcher || fetch, budget: config.aiBudget, report: true });
+    const documentFocus = construction ? await analyzeDocumentFocus(job.document, objective, { llm: config.llm, signal: job.controller.signal }) : null;
     if (!jobs.has(job.id)) return;
     advance(job, 'dashboard', 88);
     const { dashboard: proposal, report: written, ...prose } = ai;
@@ -394,6 +395,16 @@ export function createDatasetService(options = {}) {
       }
     }
     advance(job, 'report', 95);
+    if (construction) {
+      job.document.focus = documentFocus;
+      job.document.html = job.document.baseHtml;
+      if (documentFocus && ['complete', 'partial', 'unsupported'].includes(documentFocus.status) && job.document.baseHtml) {
+        const focusedHtml = renderFocusedReportHtml(await readFile(job.document.baseHtml, 'utf8'), documentFocus);
+        const focusedPath = join(job.directory, 'focused-report.html');
+        await writeFile(focusedPath, focusedHtml, { mode: 0o600 });
+        job.document.html = focusedPath;
+      }
+    }
     await writeFile(join(job.directory, 'analysis.json'), JSON.stringify(analysis), { mode: 0o600 });
     if (!jobs.has(job.id)) return;
     job.analysis = analysis;
@@ -421,8 +432,13 @@ export function createDatasetService(options = {}) {
       try { form = await new Response(body, { headers: { 'Content-Type': contentType } }).formData(); }
       catch { throw fail('INVALID_UPLOAD', 'รูปแบบคำขออัปโหลดไม่ถูกต้อง'); }
       const entries = [...form.entries()];
-      if (entries.length !== 1 || entries[0][0] !== 'file' || typeof entries[0][1] === 'string') throw fail('SINGLE_FILE_REQUIRED', 'กรุณาอัปโหลดทีละหนึ่งไฟล์ในช่อง file');
+      const [fileEntry, objectiveEntry] = entries;
+      if (!fileEntry || entries.length > 2 || fileEntry[0] !== 'file' || typeof fileEntry[1] === 'string' || (objectiveEntry && (objectiveEntry[0] !== 'objective' || typeof objectiveEntry[1] !== 'string'))) {
+        throw fail('SINGLE_FILE_REQUIRED', 'กรุณาอัปโหลดทีละหนึ่งไฟล์ในช่อง file');
+      }
       const file = entries[0][1];
+      if (objectiveEntry && objectiveEntry[1].length > 1000) throw fail('INVALID_OBJECTIVE', 'เป้าหมายการวิเคราะห์ต้องเป็นข้อความไม่เกิน 1,000 ตัวอักษร');
+      const objective = objectiveEntry ? objectiveEntry[1].trim() : '';
       const filename = sanitizeFilename(file.name);
       const extension = extname(filename).toLowerCase();
       if (!Object.hasOwn(mimeTypes, extension)) throw fail('UNSUPPORTED_FORMAT', 'รองรับเฉพาะไฟล์ .csv, .xlsx และ .xls', 415);
@@ -463,7 +479,8 @@ export function createDatasetService(options = {}) {
             const found = await worker(job, [database, input, filename, directory], undefined, config.timeoutMs, job.controller.signal, documentWorkerPath).catch(error => { if (job.controller.signal.aborted) throw error; return null; });
             if (found?.type && found.type !== 'general') {
               job.document = { type: found.type, label: found.label, headline: found.headline || '', dashboard: found.dashboard || null,
-                sheet_id: found.sheet_id || null, html: found.report ? join(directory, found.report) : null };
+                sheet_id: found.sheet_id || null, html: found.report ? join(directory, found.report) : null,
+                baseHtml: found.report ? join(directory, found.report) : null };
               if (found.type === 'benchmark') job.boq = { html: job.document.html, vendors: found.vendors || [], benchmark: found.benchmark, headline: found.headline || '' };
             } else {
               job.document = { type: 'general', label: found?.label || 'ข้อมูลทั่วไป' };
@@ -471,7 +488,7 @@ export function createDatasetService(options = {}) {
           }
           await rm(input, { force: true });
           if (!jobs.has(id)) return;
-          if (config.autoAnalyze) await analyzeDataset(job);
+          if (config.autoAnalyze) await analyzeDataset(job, objective);
           else { job.status = 'ready'; job.stage = 'preview'; job.progress = 100; }
         } catch (error) {
           recordFailure(job, error);
@@ -580,7 +597,7 @@ export function createDatasetService(options = {}) {
       if (match[2] === '/dashboard' && request.method === 'POST') return await queryDashboard(request, job);
       if (match[2] === '/export-dashboard' && request.method === 'POST') return await exportDashboard(request, job);
       if (request.method !== 'GET') throw fail('METHOD_NOT_ALLOWED', 'Method not allowed', 405);
-      if (!match[2]) return reply({ id, status: job.status, stage: job.stage, progress: job.progress, ...(job.dataset ? { dataset: job.dataset } : {}), ...(job.analysis ? { analysis: job.analysis } : {}), ...(job.boq ? { boq: { vendors: job.boq.vendors, benchmark: job.boq.benchmark, headline: job.boq.headline } } : {}), ...(job.document ? { document: { type: job.document.type, label: job.document.label, headline: job.document.headline || '', dashboard: job.document.dashboard || null, sheet_id: job.document.sheet_id || null, has_report: Boolean(job.document.html) } } : {}), ...(job.error ? { error: job.error } : {}) });
+      if (!match[2]) return reply({ id, status: job.status, stage: job.stage, progress: job.progress, ...(job.dataset ? { dataset: job.dataset } : {}), ...(job.analysis ? { analysis: job.analysis } : {}), ...(job.boq ? { boq: { vendors: job.boq.vendors, benchmark: job.boq.benchmark, headline: job.boq.headline } } : {}), ...(job.document ? { document: { type: job.document.type, label: job.document.label, headline: job.document.headline || '', dashboard: job.document.dashboard || null, sheet_id: job.document.sheet_id || null, has_report: Boolean(job.document.html), ...(job.document.focus ? { focus: job.document.focus } : {}) } } : {}), ...(job.error ? { error: job.error } : {}) });
       if (match[2] === '/boq-report') {
         // The path predates the other construction reports; it serves whichever this file has.
         const html = job.document?.html || job.boq?.html;

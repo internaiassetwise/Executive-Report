@@ -21,6 +21,18 @@ export function formatValue(value: number | string | null | undefined, format: D
 
 const clip = (label: string) => (label.length > 22 ? `${label.slice(0, 21)}…` : label);
 
+export function DocumentFocus({ focus, compact = false }: { focus?: DocumentInfo['focus']; compact?: boolean }) {
+  if (!focus) return null;
+  const ready = ['complete', 'partial', 'unsupported'].includes(focus.status);
+  return <section className="office-card doc-focus" aria-label="วิเคราะห์ตามโจทย์">
+    <div className="doc-focus-head"><h3>วิเคราะห์ตามโจทย์ที่ระบุ</h3><span>{focus.status === 'complete' ? 'วิเคราะห์แล้ว' : focus.status === 'partial' ? 'ตอบได้บางส่วน' : focus.status === 'unsupported' ? 'ข้อมูลไม่เพียงพอ' : 'ยังวิเคราะห์ตามโจทย์ไม่ได้'}</span></div>
+    <p className="doc-focus-objective">{focus.objective}</p>
+    <p>{ready ? focus.summary : focus.message}</p>
+    {!compact && ready && Boolean(focus.evidence?.length) && <><h4>หลักฐานจากข้อมูลที่คำนวณ</h4><ul>{focus.evidence?.map(item => <li key={item.id}>{item.statement}</li>)}</ul></>}
+    {compact && ready && <small>บทวิเคราะห์และหลักฐานอยู่หน้าท้ายของรายงานด้านล่าง</small>}
+  </section>;
+}
+
 /** ECharts option for a chart the server computed; no figure is derived here. */
 function chartOption(chart: DocumentChart): Record<string, unknown> {
   const show = (value: unknown) => formatValue(typeof value === 'number' ? value : null, chart.format);
@@ -79,6 +91,8 @@ export function DocumentDashboard({ id, dataset, document }: { id: string; datas
       <p>{board.headline}</p>
       <small>คำนวณจากทุกรายการในไฟล์ {board.source.filename}{where ? ` · ${where}` : ''} · ไม่นับแถวสรุปยอดและ VAT</small>
     </div></header>
+
+    <DocumentFocus focus={document.focus} />
 
     <section className="dash-kpis" aria-label="ตัวเลขสรุป">
       {board.kpis.map(kpi => <article key={kpi.label}>

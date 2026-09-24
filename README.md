@@ -8,16 +8,16 @@
 |---|---|---|
 | Parser | `backend/datasets/worker.py` | อ่าน CSV/XLSX/XLS ลง SQLite ชั่วคราว ใช้ค่าที่ Excel คำนวณไว้ของสูตร |
 | Profiler | `analyzer.py`, `semantics.py` | สถิติทุกแถว ชนิดข้อมูล (integer/decimal/date/datetime/category/…) และบทบาทคอลัมน์ (measure/dimension/time/identifier) จากชื่อ **และ** ค่าจริง |
-| AI | `backend/src/dataset-ai.mjs`, `backend/src/llm/` | **1 คำขอต่อไฟล์** ได้ Key Insights ที่อ้างหลักฐาน + Dashboard Spec (JSON) — เปลี่ยน provider ได้ (Gemini / OpenAI-compatible) |
+| AI | `backend/src/dataset-ai.mjs`, `backend/src/document-focus.mjs`, `backend/src/llm/` | ใช้ข้อมูลที่คำนวณแล้วเพื่อสรุปผล เลือก Dashboard Spec และตอบโจทย์ที่ผู้ใช้ระบุสำหรับ BOQ — เปลี่ยน provider ได้ (Gemini / OpenAI-compatible) |
 | Validator + Query | `backend/datasets/dashboard.py` | ตรวจ spec กับบทบาทคอลัมน์จริง (spec ไม่ผ่าน → ใช้แผนตามกฎแทน) และคำนวณ KPI/กราฟจาก SQLite ตามตัวกรอง |
 | Renderer | `frontend/components/dashboard-view.tsx`, `shared/dashboard-charts.mjs` | ECharts, ตัวกรอง, คลิกกราฟเพื่อ drill-down, ตารางข้อมูลตามตัวกรอง |
 | Export | `backend/src/dashboard-html.mjs`, `exports.py` | HTML ไฟล์เดียวเปิดออฟไลน์ (เก็บเฉพาะผลสรุป) และ PDF แนวนอน |
 
-ตัวเลขทุกค่าบน Dashboard มาจาก Python ไม่ใช่จาก AI ส่วน AI ได้รับเฉพาะสถิติ/ชื่อคอลัมน์/ค่าที่พบบ่อย ไม่ได้รับไฟล์หรือข้อมูลรายแถว
+ตัวเลขทุกค่าบน Dashboard มาจาก Python ไม่ใช่จาก AI การอ่านโครงสร้างอาจส่งตัวอย่างแถวต้น ๆ และรูปภาพในไฟล์ให้ AI; ขั้นสรุปผลส่งสถิติและหลักฐานที่คำนวณแล้ว ไม่ส่งไฟล์เต็ม
 
 ## ค่าใช้จ่าย AI
 
-- เรียก AI 1 ครั้งต่อการวิเคราะห์ไฟล์ การกรอง/drill-down/export ไม่เรียก AI
+- การอัปโหลดอาจเรียก AI เพื่ออ่านโครงสร้างตาราง/รูปภาพ แล้วเรียกอีกครั้งเพื่อเขียนรายงานทั่วไป หรือเมื่อผู้ใช้ระบุโจทย์สำหรับ BOQ เพื่อเขียนบทวิเคราะห์ตามโจทย์ การกรอง/drill-down/export ไม่เรียก AI
 - Gemini 3 ใช้ `thinkingLevel: minimal` (ทดสอบจริง: ~3.5k input + ~1.7k output token ต่อไฟล์ ≈ $0.01)
 - `AI_DAILY_REQUEST_LIMIT` (ค่าเริ่มต้น 200/วัน) เกินแล้วใช้แผนตามกฎแทน; ทุกคำขอบันทึก `{"event":"ai_usage",…}` (จำนวน token เท่านั้น) ใน log
 - endpoint รุ่นเก่า `/api/plan`, `/api/report`, `/api/interpret` ปิดไว้ (`LEGACY_AI_ENDPOINTS=false`)
@@ -50,7 +50,7 @@ GEMINI_MODEL=gemini-3-flash-preview
 
 ทดสอบ: `npm test` (Node), `npm run test:dashboard`, `npm run test:datasets`, `npm run test:exports` (Python)
 
-โมเดลเริ่มต้นคือ **gemini-3-flash-preview** ใช้ thinkingระดับminimal และคำขอเดียวจากสถิติ/หลักฐานที่คำนวณแล้ว มี timeout และตรวจ JSON schema/เลขอ้างอิง/ตัวเลขที่ AI กล่าวอ้าง Keysอยู่ฝั่ง backend เท่านั้น หากยังไม่ตั้ง key หรือ provider มีปัญหา ผลคำนวณ Dashboard และรายงานยังเปิดได้ พร้อมแจ้งสถานะ AI และปุ่มลองใหม่
+โมเดลเริ่มต้นคือ **gemini-3-flash-preview** มี timeout และตรวจ JSON schema/เลขอ้างอิง/ตัวเลขที่ AI กล่าวอ้าง Keys อยู่ฝั่ง backend เท่านั้น หากยังไม่ตั้ง key หรือ provider มีปัญหา ผลคำนวณ Dashboard และรายงานหลักยังเปิดได้ พร้อมแจ้งสถานะ AI
 
 แก้ค่าขีดจำกัดและ `PYTHON_BIN` ได้ใน backend/.env หลังเปลี่ยนค่าให้ restart เซิร์ฟเวอร์ ถ้าเปลี่ยน origin/port ให้แก้ `FRONTEND_ORIGINS` และ frontend `BACKEND_URL` ตามตัวอย่าง
 
@@ -66,6 +66,7 @@ GEMINI_MODEL=gemini-3-flash-preview
 - รายงาน10หัวข้อ พร้อม executive summary, findings, trends, segments, risks, quality, recommendationsและmethodology
 - ดาวน์โหลด **PDF แบบจัดหน้ารายงานจริง**, **Excel summary**, **CSV ของชีตที่เลือก** พร้อมป้องกัน formula injection
 - วิเคราะห์ใหม่พร้อมเป้าหมายที่ต้องการเน้น ยกเลิก/ลบ dataset และเก็บ sessionชั่วคราวในแท็บเดิม
+- ผู้ใช้ระบุโจทย์วิเคราะห์ BOQ ได้ ระบบเลือกหลักฐานจากตัวเลขที่คำนวณไว้และเพิ่มบทวิเคราะห์ใน Dashboard กับหน้าท้ายของรายงาน A4; หากข้อมูลไม่พอจะแจ้งข้อจำกัด
 
 ## รูปแบบข้อมูลและขีดจำกัด
 

@@ -77,6 +77,7 @@ export interface DocumentDashboardData {
 }
 export interface DocumentInfo {
   type: DocumentType; label: string; headline: string; dashboard: DocumentDashboardData | null; sheet_id: string | null; has_report: boolean;
+  focus?: { objective: string; status: 'complete' | 'partial' | 'unsupported' | 'unavailable' | 'error'; summary?: string; message?: string; evidence?: { id: string; title: string; statement: string }[] };
 }
 export interface DatasetConfig {
   max_file_size: number;
@@ -149,7 +150,7 @@ export async function removeDataset(id: string) {
 }
 
 // XHR exposes actual bytes sent. Backend polling reports parsing stages separately.
-export function uploadDataset(file: File, onProgress: (percent: number) => void, signal: AbortSignal) {
+export function uploadDataset(file: File, objective: string, onProgress: (percent: number) => void, signal: AbortSignal) {
   return new Promise<DatasetJob>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     const abort = () => xhr.abort();
@@ -170,6 +171,7 @@ export function uploadDataset(file: File, onProgress: (percent: number) => void,
     if (signal.aborted) { finish(); reject(new DOMException('Aborted', 'AbortError')); return; }
     const form = new FormData();
     form.append('file', file);
+    if (objective.trim()) form.append('objective', objective.trim());
     xhr.send(form);
   });
 }

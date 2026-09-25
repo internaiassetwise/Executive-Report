@@ -1060,6 +1060,9 @@ def main():
         elif len(sys.argv) == 4 and sys.argv[1] == "dashboard":
             from dashboard import run
             result = run(sys.argv[2], json.loads(Path(sys.argv[3]).read_text(encoding="utf-8")))
+        elif len(sys.argv) == 4 and sys.argv[1] == "query":
+            from query import run as run_queries
+            result = run_queries(sys.argv[2], json.loads(Path(sys.argv[3]).read_text(encoding="utf-8")))
         elif len(sys.argv) == 3 and sys.argv[1] == "analyze":
             from analyzer import analyze
             result = analyze(sys.argv[2], lambda stage, progress: emit({"stage": stage, "progress": progress}))

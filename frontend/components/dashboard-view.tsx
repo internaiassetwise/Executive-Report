@@ -60,7 +60,7 @@ function TraceLine({ trace }: { trace?: ValueTrace }) {
   return <em className={`dash-trace${trace.from_image ? ' warn' : ''}`} title={`ที่มา: ${where} · ${detail}`}>ที่มา {where} · {detail}</em>;
 }
 
-export function DashboardView({ id, dataset, analysis, spec: planned }: { id: string; dataset: Dataset; analysis: DatasetAnalysis; spec: DashboardSpec }) {
+export function DashboardView({ id, dataset, analysis, spec: planned, hideSummary = false }: { id: string; dataset: Dataset; analysis: DatasetAnalysis; spec: DashboardSpec; hideSummary?: boolean }) {
   const [sheetId, setSheetId] = useState(planned.sheet_id);
   const [filters, setFilters] = useState<DashboardFilter[]>([]);
   const [result, setResult] = useState<DashboardResult | null>(null);
@@ -116,6 +116,9 @@ export function DashboardView({ id, dataset, analysis, spec: planned }: { id: st
     return { ...chart, x_name: name(chart.x), y_name: chart.y ? name(chart.y) : 'จำนวนรายการ', data: [], ...computed } as ComputedChart;
   }), [spec, result, sheetId, name]);
   const chartOptions = useMemo(() => new Map(charts.map(chart => [chart.id, chartOption(chart)])), [charts]);
+  // Half-width charts pair up; an odd one out takes the full row instead of leaving a hole.
+  const narrow = charts.filter(chart => !['line', 'area', 'hbar'].includes(chart.type));
+  const lone = narrow.length % 2 ? narrow.at(-1)?.id : undefined;
 
   function drill(chart: ComputedChart, event: ChartClick) {
     const label = typeof event.name === 'string' ? event.name : '';
@@ -152,7 +155,6 @@ export function DashboardView({ id, dataset, analysis, spec: planned }: { id: st
         {spec?.description && <p>{spec.description}</p>}
         <div className="dash-meta">
           <label>ชีต <select aria-label="เลือกชีตที่ต้องการดู" value={sheetId} onChange={event => changeSheet(event.target.value)}>{[...dataset.sheets].sort((a, b) => Number(Boolean(b.combined_from)) - Number(Boolean(a.combined_from))).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-          <span>{dataset.filename}</span>
           <span>วิเคราะห์เมื่อ {new Date(analysis.generated_at).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })}</span>
         </div>
       </div>
@@ -198,7 +200,7 @@ export function DashboardView({ id, dataset, analysis, spec: planned }: { id: st
         const option = chartOptions.get(chart.id);
         const rows = [...(chart.data || []), ...(chart.others ? [{ x: chart.others.label, y: chart.others.y }] : [])];
         const notes = [seriesName(chart), chart.grain ? GRAIN_NAMES[chart.grain] : '', chart.groups_total && chart.groups_total > (chart.data?.length || 0) ? `แสดง ${chart.data?.length} อันดับแรกจาก ${formatFull(chart.groups_total)} รายการ` : '', chart.sampled ? `แสดงตัวอย่างจุดจาก ${formatFull(chart.points_total)} คู่` : ''].filter(Boolean);
-        return <article key={chart.id} className={`dash-panel${chart.type === 'line' || chart.type === 'area' || chart.type === 'hbar' ? ' wide' : ''}`}>
+        return <article key={chart.id} className={`dash-panel${chart.type === 'line' || chart.type === 'area' || chart.type === 'hbar' || chart.id === lone ? ' wide' : ''}`}>
           <div className="dash-panel-head">
             <div><h3>{chart.title}</h3><p>{notes.join(' · ')}</p></div>
             <button className="data-icon-button" aria-pressed={!!tables[chart.id]} aria-label={`แสดงตัวเลขของ ${chart.title}`} title="ดูตัวเลข" onClick={() => setTables(current => ({ ...current, [chart.id]: !current[chart.id] }))}><Table2 size={16} /></button>
@@ -211,7 +213,7 @@ export function DashboardView({ id, dataset, analysis, spec: planned }: { id: st
 
     {insights.length > 0 && <section className="dash-insights" aria-label="ข้อสังเกตสำคัญ">
       <div className="dash-section-head"><h3><Lightbulb size={17} aria-hidden="true" />ข้อสังเกตสำคัญ</h3><span>สรุปจากข้อมูลทั้งไฟล์ · ไม่เปลี่ยนตามตัวกรอง</span></div>
-      {summary?.summary && sheetId === planned.sheet_id && <p className="dash-summary">{summary.summary}</p>}
+      {!hideSummary && summary?.summary && sheetId === planned.sheet_id && <p className="dash-summary">{summary.summary}</p>}
       <ol>{insights.map((item, index) => <li key={index}><strong>{item.title}</strong><p>{item.description}</p>
         <details><summary>ที่มาของตัวเลข</summary>{item.ids.map(evidenceId => { const source = evidence.get(evidenceId); return source ? <p key={evidenceId}>{source.evidence.sheet} · {source.evidence.metric}: {formatFull(source.evidence.value)} · {source.evidence.method}</p> : null; })}</details>
       </li>)}</ol>

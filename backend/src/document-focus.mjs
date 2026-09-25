@@ -81,13 +81,14 @@ export async function analyzeDocumentFocus(document, objective, { llm, signal } 
 }
 
 /** Add one printable page to the existing deterministic BOQ report. */
-export function renderFocusedReportHtml(original, focus) {
+export function renderFocusedReportHtml(original, focus, heading = 'วิเคราะห์ตามโจทย์ที่ระบุ') {
   if (!focus || !['complete', 'partial', 'unsupported'].includes(focus.status)) return original;
   const footers = [...original.matchAll(/<div class="foot">หน้า \d+ \/ \d+<\/div>/g)];
   if (!footers.length || !original.includes('</body>')) return original;
   const total = footers.length + 1;
   const updated = original.replace(/(<div class="foot">หน้า \d+ \/ )\d+(<\/div>)/g, (_match, before, after) => `${before}${total}${after}`);
   const evidence = focus.evidence?.length ? `<h3>หลักฐานจากตัวเลขที่คำนวณ</h3><ul>${focus.evidence.map(item => `<li>${escapeHtml(item.statement)}</li>`).join('')}</ul>` : '';
-  const page = `<section class="page"><div class="run">วิเคราะห์ตามโจทย์</div><h2>วิเคราะห์ตามโจทย์ที่ระบุ</h2><p class="note">โจทย์: ${escapeHtml(focus.objective)}</p><p>${escapeHtml(focus.summary)}</p>${evidence}<p class="note">บทวิเคราะห์นี้อ้างอิงเฉพาะข้อมูลที่คำนวณจากไฟล์ โปรดตรวจทานร่วมกับขอบเขตงานและสเปก</p><div class="foot">หน้า ${total} / ${total}</div></section>`;
+  const sections = (focus.sections || []).map(section => `<h3>${escapeHtml(section.title)}</h3>${section.paragraphs.map(text => `<p>${escapeHtml(text)}</p>`).join('')}`).join('');
+  const page = `<section class="page"><div class="run">${escapeHtml(heading)}</div><h2>${escapeHtml(heading)}</h2><p class="note">โจทย์: ${escapeHtml(focus.objective)}</p><p>${escapeHtml(focus.summary)}</p>${sections}${evidence}<p class="note">บทวิเคราะห์นี้อ้างอิงเฉพาะข้อมูลที่คำนวณจากไฟล์ โปรดตรวจทานร่วมกับขอบเขตงานและสเปก</p><div class="foot">หน้า ${total} / ${total}</div></section>`;
   return updated.replace('</body>', `${page}</body>`);
 }

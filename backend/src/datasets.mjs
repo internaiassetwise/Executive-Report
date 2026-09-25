@@ -8,7 +8,8 @@ import { analyzeWithAi, DEFAULT_DATASET_MODEL } from './dataset-ai.mjs';
 import { renderDashboardHtml } from './dashboard-html.mjs';
 import { describeImages } from './image-ai.mjs';
 import { planLayouts } from './layout-ai.mjs';
-import { analyzeDocumentFocus, renderFocusedReportHtml } from './document-focus.mjs';
+import { analyzeDocumentFocus, documentEvidence, renderFocusedReportHtml } from './document-focus.mjs';
+import { answer as answerObjective, DEFAULT_OBJECTIVE, investigate, queryInsights, answerKpis } from './agent.mjs';
 import { describeFilter, formatNumber } from '../../shared/dashboard-charts.mjs';
 
 const MiB = 1024 * 1024;
@@ -157,6 +158,26 @@ export function createDatasetService(options = {}) {
     await writeFile(path, JSON.stringify(payload), { mode: 0o600, flag: 'wx' });
     try { return await worker(job, ['dashboard', job.database, path], undefined, timeoutMs, signal); }
     finally { await rm(path, { force: true }); }
+  }
+
+  /** The agent's questions, computed by the worker over every stored row. */
+  async function runQueries(job, queries, profiles) {
+    const path = join(job.directory, `query-${randomBytes(8).toString('hex')}.json`);
+    await writeFile(path, JSON.stringify({ queries, profiles }), { mode: 0o600, flag: 'wx' });
+    try { return await worker(job, ['query', job.database, path], undefined, config.timeoutMs, job.controller.signal); }
+    finally { await rm(path, { force: true }); }
+  }
+
+  /** The construction report with the objective's page and one page per follow-up question. */
+  async function refreshDocumentReport(job) {
+    if (!job.document?.baseHtml) return;
+    let html = await readFile(job.document.baseHtml, 'utf8');
+    const focus = job.document.focus;
+    if (focus && ['complete', 'partial', 'unsupported'].includes(focus.status)) html = renderFocusedReportHtml(html, focus);
+    for (const entry of job.conversation || []) html = renderFocusedReportHtml(html, { ...entry, objective: entry.question }, 'คำถามเพิ่มเติม');
+    const path = join(job.directory, 'focused-report.html');
+    await writeFile(path, html, { mode: 0o600 });
+    job.document.html = path;
   }
 
   async function jsonBody(request, limit) {
@@ -355,10 +376,33 @@ export function createDatasetService(options = {}) {
     // Construction documents keep their computed dashboard and report. A supplied
     // objective adds a separate focused reading of those computed BOQ facts.
     const construction = job.document && job.document.type !== 'general';
+    const request = objective.trim();
+    const signal = job.controller.signal;
+    const runner = (queries, profiles) => runQueries(job, queries, profiles);
+    // The agent first decides what to compute for the objective (a general overview
+    // when none was typed) and Python computes it; the answer may cite only those results.
+    let found = [];
+    let documentFocus = null;
+    if (config.llm && !construction) {
+      try { found = await investigate({ dataset: job.dataset, analysis, objective: request || DEFAULT_OBJECTIVE, llm: config.llm, runQueries: runner, signal }); }
+      catch (error) { if (signal.aborted) throw error; console.warn(JSON.stringify({ event: 'agent_fallback', stage: 'plan', reason: error?.kind || error?.code || 'error' })); }
+      analysis.insights = [...queryInsights(found), ...analysis.insights];
+    } else if (construction && request) {
+      if (config.llm) {
+        try {
+          const facts = documentEvidence(job.document.dashboard);
+          found = await investigate({ dataset: job.dataset, analysis, objective: request, facts, llm: config.llm, runQueries: runner, signal });
+          documentFocus = { ...(await answerObjective({ objective: request, found, facts, analysis, dataset: job.dataset, llm: config.llm, signal })), objective: request };
+        } catch (error) {
+          if (signal.aborted) throw error;
+          console.warn(JSON.stringify({ event: 'agent_fallback', stage: 'document', reason: error?.kind || error?.code || 'error' }));
+        }
+      }
+      documentFocus ??= await analyzeDocumentFocus(job.document, request, { llm: config.llm, signal });
+    }
     const ai = construction
       ? { model: '', summary: '', insights: [], recommendations: [], status: 'skipped', message: '' }
-      : await analyzeWithAi(job.dataset, analysis, { llm: config.llm, apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, objective, timeoutMs: config.aiTimeoutMs, signal: job.controller.signal, fetcher: config.fetcher || fetch, budget: config.aiBudget, report: true });
-    const documentFocus = construction ? await analyzeDocumentFocus(job.document, objective, { llm: config.llm, signal: job.controller.signal }) : null;
+      : await analyzeWithAi(job.dataset, analysis, { llm: config.llm, apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, objective: request, timeoutMs: config.aiTimeoutMs, signal, fetcher: config.fetcher || fetch, budget: config.aiBudget, report: true });
     if (!jobs.has(job.id)) return;
     advance(job, 'dashboard', 88);
     const { dashboard: proposal, report: written, ...prose } = ai;
@@ -395,15 +439,22 @@ export function createDatasetService(options = {}) {
       }
     }
     advance(job, 'report', 95);
+    if (!construction && found.length) {
+      // Charts of what the agent computed, the ones the report cites first.
+      const cited = new Set([...(analysis.report.sections || []).flatMap(section => section.evidence_ids || []), ...(analysis.ai.insights || []).flatMap(item => item.evidence_ids || [])]);
+      const charted = found.filter(item => item.chart).sort((a, b) => Number(cited.has(b.query.id)) - Number(cited.has(a.query.id)));
+      analysis.answer = {
+        question: request || null, charts: charted.slice(0, 6).map(item => item.chart),
+        kpis: answerKpis(found),
+        queries: found.map(item => ({ id: item.query.id, purpose: item.query.purpose, trace: item.result.trace, matched: item.result.matched })),
+      };
+    }
+    // A new analysis starts a new conversation.
+    job.conversation = [];
     if (construction) {
       job.document.focus = documentFocus;
       job.document.html = job.document.baseHtml;
-      if (documentFocus && ['complete', 'partial', 'unsupported'].includes(documentFocus.status) && job.document.baseHtml) {
-        const focusedHtml = renderFocusedReportHtml(await readFile(job.document.baseHtml, 'utf8'), documentFocus);
-        const focusedPath = join(job.directory, 'focused-report.html');
-        await writeFile(focusedPath, focusedHtml, { mode: 0o600 });
-        job.document.html = focusedPath;
-      }
+      await refreshDocumentReport(job);
     }
     await writeFile(join(job.directory, 'analysis.json'), JSON.stringify(analysis), { mode: 0o600 });
     if (!jobs.has(job.id)) return;
@@ -508,6 +559,45 @@ export function createDatasetService(options = {}) {
     }
   }
 
+  /** A follow-up question: plan, compute, answer; the answer joins the conversation and the report. */
+  async function ask(request, job) {
+    if (!job.analysis || job.status !== 'ready') throw fail('DATASET_NOT_READY', 'ยังวิเคราะห์ไฟล์ไม่เสร็จ กรุณารอสักครู่', 409);
+    if (!config.llm) throw fail('AI_UNAVAILABLE', 'ยังไม่ได้เปิดใช้ AI สำหรับถามต่อ', 503);
+    if (job.asking) throw fail('BUSY', 'กำลังตอบคำถามก่อนหน้าอยู่ กรุณารอสักครู่', 409);
+    const input = await jsonBody(request, 8192);
+    const question = typeof input.question === 'string' ? input.question.trim() : '';
+    if (!question || question.length > 1000) throw fail('INVALID_QUESTION', 'คำถามต้องเป็นข้อความ 1–1,000 ตัวอักษร');
+    if ((job.conversation || []).length >= 20) throw fail('CONVERSATION_FULL', 'ถามต่อได้สูงสุด 20 คำถามต่อไฟล์ กรุณาอัปโหลดใหม่เพื่อเริ่มใหม่', 409);
+    job.asking = true;
+    try {
+      const construction = job.document && job.document.type !== 'general';
+      const facts = construction ? documentEvidence(job.document.dashboard) : [];
+      const history = job.conversation || [];
+      const found = await investigate({ dataset: job.dataset, analysis: job.analysis, objective: question, facts, history, llm: config.llm,
+        runQueries: (queries, profiles) => runQueries(job, queries, profiles), signal: job.controller.signal, prefix: `Q${history.length + 2}` });
+      let entry;
+      try { entry = await answerObjective({ objective: question, found, facts, analysis: job.analysis, dataset: job.dataset, history, llm: config.llm, signal: job.controller.signal }); }
+      catch (error) {
+        if (job.controller.signal.aborted) throw error;
+        throw fail('ANSWER_FAILED', 'ยังตอบคำถามนี้จากข้อมูลในไฟล์ไม่ได้ ลองถามให้เจาะจงคอลัมน์หรือกลุ่มที่ต้องการ', 422);
+      }
+      entry = { ...entry, asked_at: new Date().toISOString() };
+      if (!jobs.has(job.id)) throw fail('DATASET_EXPIRED', 'ชุดข้อมูลหมดอายุแล้ว กรุณาอัปโหลดใหม่', 410);
+      job.conversation = [...history, entry];
+      // The report grows with every answer: its evidence joins the analysis so citations resolve.
+      job.analysis.insights = [...job.analysis.insights, ...queryInsights(found)];
+      if (construction) await refreshDocumentReport(job);
+      else {
+        const sections = job.analysis.report.sections;
+        sections.push({ id: `qa_${job.conversation.length}`, title: `${sections.length + 1}. คำถามเพิ่มเติม: ${question.slice(0, 120)}`,
+          paragraphs: [entry.summary, ...entry.sections.map(section => `${section.title}: ${section.paragraphs.join(' ')}`)].filter(Boolean),
+          evidence_ids: [...new Set(entry.sections.flatMap(section => section.evidence_ids))] });
+      }
+      await writeFile(join(job.directory, 'analysis.json'), JSON.stringify(job.analysis), { mode: 0o600 });
+      return reply(entry);
+    } finally { job.asking = false; }
+  }
+
   async function reanalyze(request, job) {
     if (!job.dataset) throw fail('DATASET_NOT_READY', 'ยังอ่านไฟล์ไม่สำเร็จ กรุณาอัปโหลดใหม่', 409);
     if (job.status === 'processing') throw fail('BUSY', 'ชุดข้อมูลนี้กำลังประมวลผลอยู่', 409);
@@ -586,7 +676,7 @@ export function createDatasetService(options = {}) {
         if (request.method === 'POST') { await sweep(); return await upload(request); }
         throw fail('METHOD_NOT_ALLOWED', 'Method not allowed', 405);
       }
-      const match = /^\/api\/datasets\/([A-Za-z0-9_-]{32})(\/(?:rows|analyze|export|dashboard|export-dashboard|boq-report))?$/.exec(url.pathname);
+      const match = /^\/api\/datasets\/([A-Za-z0-9_-]{32})(\/(?:rows|analyze|ask|export|dashboard|export-dashboard|boq-report))?$/.exec(url.pathname);
       if (!match) throw fail('NOT_FOUND', 'ไม่พบชุดข้อมูล', 404);
       const id = match[1];
       const job = jobs.get(id);
@@ -594,10 +684,11 @@ export function createDatasetService(options = {}) {
       if (!job || !jobs.has(id)) throw fail('DATASET_EXPIRED', 'ไม่พบชุดข้อมูล หรือไฟล์ชั่วคราวหมดอายุแล้ว กรุณาอัปโหลดใหม่', 404);
       if (!match[2] && request.method === 'DELETE') { await removeJob(id); return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } }); }
       if (match[2] === '/analyze' && request.method === 'POST') return await reanalyze(request, job);
+      if (match[2] === '/ask' && request.method === 'POST') return await ask(request, job);
       if (match[2] === '/dashboard' && request.method === 'POST') return await queryDashboard(request, job);
       if (match[2] === '/export-dashboard' && request.method === 'POST') return await exportDashboard(request, job);
       if (request.method !== 'GET') throw fail('METHOD_NOT_ALLOWED', 'Method not allowed', 405);
-      if (!match[2]) return reply({ id, status: job.status, stage: job.stage, progress: job.progress, ...(job.dataset ? { dataset: job.dataset } : {}), ...(job.analysis ? { analysis: job.analysis } : {}), ...(job.boq ? { boq: { vendors: job.boq.vendors, benchmark: job.boq.benchmark, headline: job.boq.headline } } : {}), ...(job.document ? { document: { type: job.document.type, label: job.document.label, headline: job.document.headline || '', dashboard: job.document.dashboard || null, sheet_id: job.document.sheet_id || null, has_report: Boolean(job.document.html), ...(job.document.focus ? { focus: job.document.focus } : {}) } } : {}), ...(job.error ? { error: job.error } : {}) });
+      if (!match[2]) return reply({ id, status: job.status, stage: job.stage, progress: job.progress, ...(job.dataset ? { dataset: job.dataset } : {}), ...(job.analysis ? { analysis: job.analysis } : {}), ...(job.boq ? { boq: { vendors: job.boq.vendors, benchmark: job.boq.benchmark, headline: job.boq.headline } } : {}), ...(job.document ? { document: { type: job.document.type, label: job.document.label, headline: job.document.headline || '', dashboard: job.document.dashboard || null, sheet_id: job.document.sheet_id || null, has_report: Boolean(job.document.html), ...(job.document.focus ? { focus: job.document.focus } : {}) } } : {}), ...(job.conversation?.length ? { conversation: job.conversation } : {}), ...(job.error ? { error: job.error } : {}) });
       if (match[2] === '/boq-report') {
         // The path predates the other construction reports; it serves whichever this file has.
         const html = job.document?.html || job.boq?.html;

@@ -23,6 +23,8 @@ function fakeLlm(dashboard, calls = [], layoutCalls = []) {
         layoutCalls.push(request);
         return { data: { sheets: [] }, usage: {} };
       }
+      // The agent's planning request: nothing extra to compute here.
+      if (request.schema?.properties?.queries) return { data: { queries: [] }, usage: {} };
       calls.push(request);
       return { data: { summary: 'สรุปจากหลักฐาน', insights: [], recommendations: [], dashboard }, usage: {} };
     },

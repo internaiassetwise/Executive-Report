@@ -60,12 +60,27 @@ export interface DatasetJob {
   boq?: { vendors: string[]; benchmark?: string; headline?: string };
   /** What kind of document the file is; construction cost documents carry their own dashboard. */
   document?: DocumentInfo;
+  /** Follow-up questions and their computed answers, oldest first. */
+  conversation?: AgentAnswer[];
   error?: { code: string; message: string };
+}
+/** An answer the agent computed: every number in it comes from a query the server ran. */
+export interface AgentAnswer {
+  question: string | null;
+  status: 'complete' | 'partial' | 'unsupported';
+  title: string;
+  summary: string;
+  sections: { title: string; paragraphs: string[]; evidence_ids: string[] }[];
+  charts: DocumentChart[];
+  kpis: { label: string; value: number | null; note: string }[];
+  evidence: { id: string; statement: string }[];
+  queries: { id: string; purpose: string; matched?: number; trace?: { sheet?: string; table?: string; range?: string } }[];
+  asked_at?: string;
 }
 export type DocumentType = 'benchmark' | 'comparison' | 'estimate' | 'general';
 export type DocumentFormat = 'money' | 'percent' | 'percent_signed' | 'count' | 'number' | 'text';
 export interface DocumentChart {
-  id: string; title: string; kind: 'bar' | 'hbar' | 'stacked' | 'donut' | 'pareto'; format: DocumentFormat; note: string;
+  id: string; title: string; kind: 'bar' | 'hbar' | 'line' | 'stacked' | 'donut' | 'pareto'; format: DocumentFormat; note: string;
   categories: string[]; series: { name: string; values: (number | null)[] }[]; reference?: { name: string; value: number };
 }
 export interface DocumentDashboardData {
@@ -77,7 +92,8 @@ export interface DocumentDashboardData {
 }
 export interface DocumentInfo {
   type: DocumentType; label: string; headline: string; dashboard: DocumentDashboardData | null; sheet_id: string | null; has_report: boolean;
-  focus?: { objective: string; status: 'complete' | 'partial' | 'unsupported' | 'unavailable' | 'error'; summary?: string; message?: string; evidence?: { id: string; title: string; statement: string }[] };
+  /** The answer to the upload objective; agent answers also carry sections, charts and KPIs. */
+  focus?: Partial<Omit<AgentAnswer, 'status' | 'evidence'>> & { objective: string; status: 'complete' | 'partial' | 'unsupported' | 'unavailable' | 'error'; message?: string; evidence?: { id: string; title?: string; statement: string }[] };
 }
 export interface DatasetConfig {
   max_file_size: number;
@@ -126,6 +142,10 @@ export const getDatasetJob = (id: string, signal?: AbortSignal) =>
   fetch(`/api/datasets/${encodeURIComponent(id)}`, { signal, cache: 'no-store' }).then(readJson<DatasetJob>);
 export const getDataPage = (id: string, query: URLSearchParams, signal?: AbortSignal) =>
   fetch(`/api/datasets/${encodeURIComponent(id)}/rows?${query}`, { signal, cache: 'no-store' }).then(readJson<DataPage>);
+export const askDataset = (id: string, question: string, signal?: AbortSignal) =>
+  fetch(`/api/datasets/${encodeURIComponent(id)}/ask`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question }), signal,
+  }).then(readJson<AgentAnswer>);
 export const analyzeDataset = (id: string, objective = '') =>
   fetch(`/api/datasets/${encodeURIComponent(id)}/analyze`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ objective }),

@@ -1,5 +1,6 @@
 import type { DataType } from './datasets';
 import type { DashboardSpec } from './dashboard';
+import type { DocumentChart } from './datasets';
 
 export interface DatasetKpi {
   id: string; name: string; value: number | string; formatted_value: string;
@@ -42,4 +43,6 @@ export interface DatasetAnalysis {
   report: { source?: 'ai'; title?: string; sections: { id: string; title: string; paragraphs: string[]; evidence_ids: string[] }[] };
   ai?: DatasetAI;
   dashboard?: DashboardSpec | null;
+  /** What the agent computed for the upload objective (or the default overview when none was given). */
+  answer?: { question: string | null; charts: DocumentChart[]; kpis: { label: string; value: number | null; note: string }[] };
 }

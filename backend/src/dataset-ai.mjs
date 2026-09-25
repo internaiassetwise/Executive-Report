@@ -55,6 +55,7 @@ const SYSTEM = [
 // Only for general files (construction cost files have their own fixed report).
 const REPORT_PART = [
   'PART 3 - report. Write the report for THIS file in Thai, shaped by what the file is about (for example a complaints log, a customer list, an accounting journal, an event registration). There is no template: choose 3-7 section titles that fit this content and its readers, and skip anything the evidence cannot support. Do not add sections about time trends, anomalies or data quality unless the evidence shows something worth telling.',
+  'When an objective is given, the first section answers it directly and the rest is organised around it; Q- evidence was computed for this objective, so prefer it.',
   'Each section: 1-4 short paragraphs of plain business Thai for executives, and the evidence_ids it relies on. The same number rule as PART 1 applies to every paragraph: only numbers stated in the cited evidence, the KPIs or the dataset counts. Never use statistics jargon (IQR, Pearson, standard deviation); say what it means instead. Report title: short, names what the file is about.',
 ].join(' ');
 
@@ -155,8 +156,16 @@ function evidenceCorpus(analysis) {
   return analysis.insights.map(item => ({ evidence_id: item.id, finding: `${item.title} ${item.description} ${JSON.stringify(item.evidence.value)}`, method: item.evidence.method }));
 }
 
+/** Evidence ids are for checking, not for readers: drop "(EV-001, Q-002)" and stray ids from shown text. */
+export function readable(text) {
+  return String(text)
+    .replace(/\s*[(\[]\s*(?:(?:EV|BOQ|Q\d*)-\d+\s*[,;/]?\s*(?:และ\s*)?)+[)\]]/gi, '')
+    .replace(/\b(?:EV|BOQ|Q\d*)-\d+\b\s*[,;]?/gi, '')
+    .replace(/[ \t]{2,}/g, ' ').replace(/\s+([.,;:])/g, '$1').trim();
+}
+
 export function signedGrounded(text, evidence) {
-  const withoutCitations = value => String(value).replace(/\bEV-\d+\b/gi, ' ').replace(/\u2212/g, '-');
+  const withoutCitations = value => String(value).replace(/\b(?:EV|BOQ|Q\d*)-\d+\b/gi, ' ').replace(/\u2212/g, '-');
   const claims = withoutCitations(text);
   if (/\p{N}/u.test(claims.replace(/[0-9]/g, ''))) return false;
   // Hyphens inside dates or ranges separate positive quantities, not negatives.
@@ -191,7 +200,7 @@ export function validateAiResult(output, analysis, dataset, context = buildAiCon
     && signedGrounded(`${item.title} ${item.description}`, cited(item.evidence_ids)));
   const recommendations = output.recommendations.slice(0, 8).filter(item => item && text(item.text, 1, 1200) && references(item.evidence_ids)
     && signedGrounded(item.text, cited(item.evidence_ids)));
-  const summary = text(output.summary, 1, 2500) && signedGrounded(output.summary, overview) ? output.summary.trim() : '';
+  const summary = text(output.summary, 1, 2500) && signedGrounded(output.summary, overview) ? readable(output.summary) : '';
   const report = validReport(output.report, ids, cited, overview, text);
   const dropped = { summary: !summary && Boolean(output.summary), insights: output.insights.length - insights.length, recommendations: output.recommendations.length - recommendations.length };
   // Counts only: never the statements themselves.
@@ -201,8 +210,8 @@ export function validateAiResult(output, analysis, dataset, context = buildAiCon
   return {
     ...(report ? { report } : {}),
     summary,
-    insights: insights.map(item => ({ title: item.title.trim(), description: item.description.trim(), evidence_ids: [...new Set(item.evidence_ids)] })),
-    recommendations: recommendations.map(item => ({ text: item.text.trim(), evidence_ids: [...new Set(item.evidence_ids)] })),
+    insights: insights.map(item => ({ title: readable(item.title), description: readable(item.description), evidence_ids: [...new Set(item.evidence_ids)] })),
+    recommendations: recommendations.map(item => ({ text: readable(item.text), evidence_ids: [...new Set(item.evidence_ids)] })),
   };
 }
 
@@ -222,7 +231,7 @@ function validReport(report, ids, cited, overview, text) {
       const ok = text(paragraph, 1, 2000) && signedGrounded(paragraph, [...cited(evidence), ...overview]);
       if (!ok) dropped++;
       return ok;
-    }).map(paragraph => paragraph.trim());
+    }).map(readable).filter(Boolean);
     if (paragraphs.length) sections.push({ title: section.title.trim(), paragraphs, evidence_ids: evidence });
   }
   if (dropped) console.warn(JSON.stringify({ event: 'ai_report_paragraphs_dropped', count: dropped }));

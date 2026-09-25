@@ -280,6 +280,7 @@ test('upload objective reaches the first AI analysis and rejects oversized text'
   const seen = [];
   const llm = { name: 'fake', model: 'fake', async generateJson(input) {
     if (input.schema.properties.sheets) return { data: { sheets: [] }, usage: {} };
+    if (input.schema.properties.queries) return agentPlan(input);
     seen.push(JSON.parse(input.prompt).objective);
     return { data: { summary: '', insights: [], recommendations: [] }, usage: {} };
   } };
@@ -298,7 +299,8 @@ test('BOQ objective appears in focused dashboard result and printable report', a
     if (input.schema.properties.sheets) return { data: { sheets: [] }, usage: {} };
     const prompt = JSON.parse(input.prompt);
     calls.push(prompt);
-    return { data: { status: 'complete', summary: prompt.facts[0].statement, evidence_ids: [prompt.facts[0].id] }, usage: {} };
+    if (input.schema.properties.queries) return agentPlan(input);
+    return agentAnswer(input);
   } };
   const { handle } = await context(t, { autoAnalyze: true, llm });
   const bytes = await readFile(new URL('./fixtures/excel/cost_estimate.xlsx', import.meta.url));
@@ -308,11 +310,55 @@ test('BOQ objective appears in focused dashboard result and printable report', a
   assert.equal(job.document.type, 'estimate');
   assert.equal(job.document.focus.status, 'complete');
   assert.equal(job.document.focus.objective, 'เน้นมูลค่ารวม');
-  assert.equal(calls.length, 1, 'one focused BOQ request follows the layout request');
+  assert.equal(calls.length, 2, 'the agent plans once and answers once after the layout request');
+  assert.match(job.document.focus.sections[0].paragraphs[0], /\d/, 'the answer quotes a total Python computed');
+  assert.equal(job.document.focus.sections[0].evidence_ids[0], 'Q-001');
+  assert.equal(job.document.focus.sections[0].paragraphs.length, 1, 'the invented forecast is dropped');
   const report = await handle(request(`/${id}/boq-report`));
   assert.equal(report.status, 200);
   const html = await report.text();
   assert.match(html, /เน้นมูลค่ารวม/);
   assert.match(html, /วิเคราะห์ตามโจทย์ที่ระบุ/);
   assert.match(html, /หน้า \d+ \/ \d+/);
+});
+
+// Fake agent: plan a sum of the first numeric column (grouped by the first text column),
+// then answer by quoting the computed statement plus one invented forecast that must be dropped.
+function agentPlan(input) {
+  const { profiles } = JSON.parse(input.prompt);
+  const sheet = profiles[0];
+  const measure = sheet.columns.find(column => column.role === 'measure' || column.data_type === 'number');
+  const label = sheet.columns.find(column => column.data_type === 'text' && column !== measure);
+  return { data: { queries: [{ purpose: 'ยอดรวม', sheet_id: sheet.sheet_id, measure: measure.key, agg: 'sum', group_by: label ? [label.key] : [], filters: [], sort: 'desc' }] }, usage: {} };
+}
+
+function agentAnswer(input) {
+  const result = JSON.parse(input.prompt).evidence.find(item => /^Q\d*-/.test(item.id));
+  return { data: { status: 'complete', title: 'ยอดรวม', summary: '', chart_ids: [result.id],
+    sections: [{ title: 'ยอดรวม', paragraphs: [result.statement, 'คาดว่าปีหน้าจะโต 73%'], evidence_ids: [result.id] }] }, usage: {} };
+}
+
+test('follow-up questions are planned, computed and answered from the results', async t => {
+  const llm = { name: 'fake', model: 'fake', async generateJson(input) {
+    if (input.schema.properties.sheets) return { data: { sheets: [] }, usage: {} };
+    if (input.schema.properties.queries) return agentPlan(input);
+    if (input.schema.properties.chart_ids) return agentAnswer(input);
+    return { data: { summary: '', insights: [], recommendations: [] }, usage: {} };
+  } };
+  const { handle } = await context(t, { autoAnalyze: true, llm });
+  const id = await upload(handle, 'team,amount\nNorth,10\nSouth,20\n');
+  assert.equal((await finish(handle, id)).status, 'ready');
+  const ask = question => handle(request(`/${id}/ask`, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ question }) }));
+  const asked = await ask('ทีมไหนยอดสูงสุด');
+  const entry = await asked.json();
+  assert.equal(asked.status, 200, JSON.stringify(entry));
+  assert.equal(entry.question, 'ทีมไหนยอดสูงสุด');
+  assert.equal(entry.sections[0].paragraphs.length, 1, 'a paragraph with a number nobody computed is dropped');
+  assert.deepEqual(entry.charts[0].categories, ['South', 'North']);
+  assert.deepEqual(entry.charts[0].series[0].values, [20, 10]);
+  assert.match(entry.charts[0].id, /^Q2-/, 'follow-up evidence ids never collide with the upload analysis');
+  const job = await (await handle(request(`/${id}`))).json();
+  assert.equal(job.conversation.length, 1);
+  assert.match(job.analysis.report.sections.at(-1).title, /คำถามเพิ่มเติม: ทีมไหนยอดสูงสุด/);
+  assert.equal((await ask('   ')).status, 400);
 });

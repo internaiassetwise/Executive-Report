@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,8 +8,9 @@ import { analyzeWithAi, DEFAULT_DATASET_MODEL } from './dataset-ai.mjs';
 import { renderDashboardHtml } from './dashboard-html.mjs';
 import { describeImages } from './image-ai.mjs';
 import { planLayouts } from './layout-ai.mjs';
-import { analyzeDocumentFocus, documentEvidence, renderFocusedReportHtml } from './document-focus.mjs';
-import { answer as answerObjective, DEFAULT_OBJECTIVE, investigate, queryInsights, answerKpis } from './agent.mjs';
+import { analyzeDocumentFocus, documentEvidence, renderFocusedReportHtml, reportPageCount } from './document-focus.mjs';
+import { answer as answerObjective, DEFAULT_OBJECTIVE, investigate, queryInsights, answerKpis, queryTable } from './agent.mjs';
+import { DEFAULT_PAGES, reportEvidence, requestedPages, writeReport } from './report-author.mjs';
 import { describeFilter, formatNumber } from '../../shared/dashboard-charts.mjs';
 
 const MiB = 1024 * 1024;
@@ -389,31 +390,46 @@ export function createDatasetService(options = {}) {
     const runner = (queries, profiles) => runQueries(job, queries, profiles);
     // The agent first decides what to compute for the objective (a general overview
     // when none was typed) and Python computes it; the answer may cite only those results.
+    // "สรุป 7 หน้า" asks for a length; without one the report is a detailed few pages.
+    const asked = requestedPages(request);
+    const pages = asked ?? DEFAULT_PAGES;
+    const overview = [`${job.dataset.rows_count} ${job.dataset.columns_count} ${job.dataset.sheets.length}`, ...analysis.kpis.map(kpi => `${kpi.value} ${kpi.formatted_value}`)]
+      .map(finding => ({ finding, method: '' }));
+    const warn = stage => error => { if (signal.aborted) throw error; console.warn(JSON.stringify({ event: 'agent_fallback', stage, reason: error?.kind || error?.code || error?.message || 'error' })); return null; };
     let found = [];
     let documentFocus = null;
     if (config.llm && !construction) {
-      try { found = await investigate({ dataset: job.dataset, analysis, objective: request || DEFAULT_OBJECTIVE, llm: config.llm, runQueries: runner, signal }); }
-      catch (error) { if (signal.aborted) throw error; console.warn(JSON.stringify({ event: 'agent_fallback', stage: 'plan', reason: error?.kind || error?.code || 'error' })); }
+      // A longer report needs more computed results to write about.
+      try { found = await investigate({ dataset: job.dataset, analysis, objective: request || DEFAULT_OBJECTIVE, llm: config.llm, runQueries: runner, signal, limit: Math.min(24, 8 + pages * 2) }); }
+      catch (error) { warn('plan')(error); }
       analysis.insights = [...queryInsights(found), ...analysis.insights];
     } else if (construction && request) {
       if (config.llm) {
         try {
           const facts = documentEvidence(job.document.dashboard);
-          found = await investigate({ dataset: job.dataset, analysis, objective: request, facts, llm: config.llm, runQueries: runner, signal });
+          found = await investigate({ dataset: job.dataset, analysis, objective: request, facts, llm: config.llm, runQueries: runner, signal, limit: Math.min(24, 8 + pages * 2) });
           documentFocus = { ...(await answerObjective({ objective: request, found, facts, analysis, dataset: job.dataset, llm: config.llm, signal })), objective: request };
-        } catch (error) {
-          if (signal.aborted) throw error;
-          console.warn(JSON.stringify({ event: 'agent_fallback', stage: 'document', reason: error?.kind || error?.code || 'error' }));
-        }
+          // The engine report keeps its pages; the answer gets the rest of the length asked for.
+          const base = reportPageCount(await readFile(job.document.baseHtml, 'utf8').catch(() => ''));
+          const detail = await writeReport({ objective: request, pages: asked ? Math.max(1, asked - base) : 1, share: 0.9, evidence: reportEvidence({ found, facts, analysis }),
+            overview, dataset: job.dataset, llm: config.llm, signal }).catch(warn('document_report'));
+          if (detail) documentFocus.sections = detail.sections;
+        } catch (error) { warn('document')(error); }
       }
       documentFocus ??= await analyzeDocumentFocus(job.document, request, { llm: config.llm, signal });
     }
-    const ai = construction
-      ? { model: '', summary: '', insights: [], recommendations: [], status: 'skipped', message: '' }
-      : await analyzeWithAi(job.dataset, analysis, { llm: config.llm, apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, objective: request, timeoutMs: config.aiTimeoutMs, signal, fetcher: config.fetcher || fetch, budget: config.aiBudget, report: true });
+    // The summary and dashboard plan, and the report written section by section, in parallel.
+    const [ai, written] = await Promise.all([
+      construction
+        ? { model: '', summary: '', insights: [], recommendations: [], status: 'skipped', message: '' }
+        : analyzeWithAi(job.dataset, analysis, { llm: config.llm, apiKey: config.apiKey, model: config.model || DEFAULT_DATASET_MODEL, objective: request, timeoutMs: config.aiTimeoutMs, signal, fetcher: config.fetcher || fetch, budget: config.aiBudget, report: false }),
+      !construction && config.llm
+        ? writeReport({ objective: request, pages, evidence: reportEvidence({ found, analysis }), overview, dataset: job.dataset, llm: config.llm, signal }).catch(warn('report'))
+        : null,
+    ]);
     if (!jobs.has(job.id)) return;
     advance(job, 'dashboard', 88);
-    const { dashboard: proposal, report: written, ...prose } = ai;
+    const { dashboard: proposal, ...prose } = ai;
     analysis.ai = prose;
     // The AI plan replaces the rule-based plan only after Python validates it
     // against the real column roles; otherwise the rule-based plan stays.
@@ -429,8 +445,14 @@ export function createDatasetService(options = {}) {
     }
     advance(job, 'dashboard', 90);
     if (written) {
-      // The report the model wrote for this file replaces the computed outline.
-      analysis.report = { source: 'ai', title: written.title, sections: written.sections.map((section, index) => ({ id: `ai_${index + 1}`, title: `${index + 1}. ${section.title}`, paragraphs: section.paragraphs, evidence_ids: section.evidence_ids })) };
+      // The report written for this file replaces the computed outline. The tables are the
+      // cited results exactly as computed; the PDF places them under the sections that cite them.
+      const cited = new Set(written.sections.flatMap(section => section.evidence_ids));
+      analysis.report = {
+        source: 'ai', title: written.title, pages: asked, characters: written.characters,
+        sections: written.sections.map((section, index) => ({ id: `ai_${index + 1}`, title: `${index + 1}. ${section.title}`, paragraphs: section.paragraphs, evidence_ids: section.evidence_ids })),
+        tables: Object.fromEntries(found.filter(item => cited.has(item.query.id)).map(queryTable).filter(Boolean).map(table => [table.id, table])),
+      };
       analysis.ai.report = 'written';
     } else if (analysis.ai.status === 'complete') {
       const executive = analysis.report.sections.find(section => section.id === 'executive_summary');
@@ -655,7 +677,9 @@ export function createDatasetService(options = {}) {
     try {
       if (!job.analysis) await writeFile(analysisPath, '{}', { mode: 0o600 });
       const result = await worker(job, ['export', job.database, analysisPath, format, output, sheet], undefined, config.timeoutMs, request.signal, exportWorkerPath);
-      if (!result || typeof result.path !== 'string' || resolve(result.path) !== resolve(output)) throw fail('EXPORT_FAILED', 'ตำแหน่งไฟล์ส่งออกไม่ถูกต้อง', 500);
+      // Real paths on both sides: Windows temp folders have short (8.3) and long names for the same place.
+      const same = typeof result?.path === 'string' && await realpath(result.path).then(async path => path === await realpath(output)).catch(() => false);
+      if (!same) throw fail('EXPORT_FAILED', 'ตำแหน่งไฟล์ส่งออกไม่ถูกต้อง', 500);
       const info = await lstat(output);
       if (!info.isFile() || info.isSymbolicLink() || info.size > 100 * MiB) throw fail('EXPORT_TOO_LARGE', 'ไฟล์ส่งออกใหญ่เกินไป กรุณาลดขนาดข้อมูลหรือเลือก CSV', 413);
       const bytes = await readFile(output);

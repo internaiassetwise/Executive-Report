@@ -25,6 +25,8 @@ function fakeLlm(dashboard, calls = [], layoutCalls = []) {
       }
       // The agent's planning request: nothing extra to compute here.
       if (request.schema?.properties?.queries) return { data: { queries: [] }, usage: {} };
+      // The report writer's outline: none here, so the computed report outline stays.
+      if (request.schema?.properties?.sections && !request.schema.properties.summary) return { data: { title: '', sections: [] }, usage: {} };
       calls.push(request);
       return { data: { summary: 'สรุปจากหลักฐาน', insights: [], recommendations: [], dashboard }, usage: {} };
     },

@@ -64,6 +64,16 @@ function DocumentReport({ id, title, filename, version }: { id: string; title: s
   </>;
 }
 
+/** A cited result exactly as computed: groups, value and share. */
+function ReportTable({ table }: { table: NonNullable<DatasetAnalysis['report']['tables']>[string] }) {
+  return <figure className="report-table">
+    <figcaption>{table.title}</figcaption>
+    <table><thead><tr>{table.headers.map(header => <th key={header}>{header}</th>)}</tr></thead>
+      <tbody>{table.rows.slice(0, 20).map((row, index) => <tr key={index}>{row.map((cell, position) => <td key={position} className={typeof cell === 'number' ? 'num' : ''}>{num(cell)}</td>)}</tr>)}</tbody></table>
+    {table.note && <small>{table.note}</small>}
+  </figure>;
+}
+
 const RANK = { high: 0, medium: 1, low: 2 } as const;
 
 /** First thing on the dashboard: the summary, the key findings, and the answer to the objective if one was typed. */
@@ -173,13 +183,14 @@ export function DatasetResults({ id, dataset, analysis, boq, document, conversat
 
     {tab === 'report' && (boq || construction?.has_report) && <><DocumentFocus focus={construction?.focus} compact /><DocumentReport id={id} title={reportTitle} filename={dataset.filename} version={conversation.length} /></>}
     {tab === 'report' && !boq && !construction?.has_report && analysis && <>
-      <div className="office-commandbar"><span>รายงานสรุปผลการวิเคราะห์ (A4)</span><div>
+      <div className="office-commandbar"><span>รายงานสรุปผลการวิเคราะห์ (A4{analysis.report.pages ? ` · ${analysis.report.pages} หน้าตามที่ขอ` : ''})</span><div>
         <button className="office-button" disabled={Boolean(exporting)} onClick={() => void download('xlsx')}>{exporting === 'xlsx' ? <LoaderCircle size={15} className="data-spin" /> : <FileSpreadsheet size={15} />}Excel</button>
         <button className="office-button primary" disabled={Boolean(exporting)} onClick={() => void download('pdf')}>{exporting === 'pdf' ? <LoaderCircle size={15} className="data-spin" /> : <Download size={15} />}PDF</button>
       </div></div>
       <article className="insight-report">
         <header className="insight-report-header"><span>ASSETWISE</span><h2>{analysis.report.title || 'รายงานการวิเคราะห์ข้อมูล'}</h2><p>{dataset.filename}</p><div><span>{num(dataset.rows_count)} แถว · {dataset.sheets.length} ชีต</span><span>{new Date(analysis.generated_at).toLocaleDateString('th-TH', { dateStyle: 'long' })}</span></div></header>
-        {analysis.report.sections.map((section, index) => <section key={section.id}><div className="insight-report-section-title"><span>{String(index + 1).padStart(2, '0')}</span><h3>{section.title.replace(/^\d+\.\s*/, '')}</h3></div>{section.paragraphs.map((paragraph, number) => <p key={number}>{paragraph}</p>)}</section>)}
+        {analysis.report.sections.map((section, index) => <section key={section.id}><div className="insight-report-section-title"><span>{String(index + 1).padStart(2, '0')}</span><h3>{section.title.replace(/^\d+\.\s*/, '')}</h3></div>{section.paragraphs.map((paragraph, number) => <p key={number}>{paragraph}</p>)}
+          {section.evidence_ids.filter(id => analysis.report.tables?.[id]).slice(0, 2).map(id => <ReportTable key={id} table={analysis.report.tables![id]} />)}</section>)}
         <footer>ตัวเลขทุกค่าคำนวณจากข้อมูลในไฟล์ที่อัปโหลด ข้อเสนอแนะควรพิจารณาร่วมกับบริบทของงานก่อนตัดสินใจ</footer>
       </article>
     </>}

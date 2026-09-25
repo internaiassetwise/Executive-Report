@@ -312,6 +312,8 @@ test('upload objective reaches the first AI analysis and rejects oversized text'
   const llm = { name: 'fake', model: 'fake', async generateJson(input) {
     if (input.schema.properties.sheets) return { data: { sheets: [] }, usage: {} };
     if (input.schema.properties.queries) return agentPlan(input);
+    if (input.schema.properties.paragraphs) return reportSection(input);
+    if (input.schema.properties.sections && !input.schema.properties.summary) return reportOutline(input);
     seen.push(JSON.parse(input.prompt).objective);
     return { data: { summary: '', insights: [], recommendations: [] }, usage: {} };
   } };
@@ -328,8 +330,9 @@ test('BOQ objective appears in focused dashboard result and printable report', a
   const calls = [];
   const llm = { name: 'fake', model: 'fake', async generateJson(input) {
     if (input.schema.properties.sheets) return { data: { sheets: [] }, usage: {} };
-    const prompt = JSON.parse(input.prompt);
-    calls.push(prompt);
+    if (input.schema.properties.paragraphs) return reportSection(input);
+    if (input.schema.properties.sections && !input.schema.properties.summary) return reportOutline(input);
+    calls.push(input);
     if (input.schema.properties.queries) return agentPlan(input);
     return agentAnswer(input);
   } };
@@ -342,6 +345,7 @@ test('BOQ objective appears in focused dashboard result and printable report', a
   assert.equal(job.document.focus.status, 'complete');
   assert.equal(job.document.focus.objective, 'เน้นมูลค่ารวม');
   assert.equal(calls.length, 2, 'the agent plans once and answers once after the layout request');
+  // The detail under the answer comes from the report writer; its invented forecast is dropped.
   assert.match(job.document.focus.sections[0].paragraphs[0], /\d/, 'the answer quotes a total Python computed');
   assert.equal(job.document.focus.sections[0].evidence_ids[0], 'Q-001');
   assert.equal(job.document.focus.sections[0].paragraphs.length, 1, 'the invented forecast is dropped');
@@ -368,6 +372,45 @@ function agentAnswer(input) {
   return { data: { status: 'complete', title: 'ยอดรวม', summary: '', chart_ids: [result.id],
     sections: [{ title: 'ยอดรวม', paragraphs: [result.statement, 'คาดว่าปีหน้าจะโต 73%'], evidence_ids: [result.id] }] }, usage: {} };
 }
+
+// Fake report writer: one section on the first evidence; it quotes the evidence and adds a forecast
+// nobody computed, which the number check must drop.
+function reportOutline(input) {
+  const { evidence, sections_required: count } = JSON.parse(input.prompt);
+  const ids = evidence.map(item => item.id);
+  return { data: { title: 'รายงานทดสอบ', sections: Array.from({ length: count }, (_, index) => ({ title: `หัวข้อ ${index + 1}`, brief: '', evidence_ids: [ids[index % ids.length]], weight: 2 })) }, usage: {} };
+}
+function reportSection(input) {
+  const { evidence } = JSON.parse(input.prompt);
+  return { data: { paragraphs: [evidence[0]?.statement, 'คาดว่าปีหน้าจะโต 73%'].filter(Boolean) }, usage: {} };
+}
+
+test('a length in the objective sizes the report; each section is written from its evidence', async t => {
+  const outlines = [];
+  const llm = { name: 'fake', model: 'fake', async generateJson(input) {
+    if (input.schema.properties.sheets) return { data: { sheets: [] }, usage: {} };
+    if (input.schema.properties.queries) {
+      assert.match(input.system, /up to 22 queries/, 'a 7-page report plans more computations');
+      return agentPlan(input);
+    }
+    if (input.schema.properties.paragraphs) return reportSection(input);
+    if (input.schema.properties.sections && !input.schema.properties.summary) { outlines.push(JSON.parse(input.prompt)); return reportOutline(input); }
+    return { data: { summary: '', insights: [], recommendations: [] }, usage: {} };
+  } };
+  const { handle } = await context(t, { autoAnalyze: true, llm });
+  const id = await upload(handle, 'team,amount\nNorth,10\nSouth,20\n', 'data.csv', 'text/csv', 'สรุปยอดตามทีม ขอ 7 หน้า');
+  const job = await finish(handle, id);
+  assert.equal(job.status, 'ready', JSON.stringify(job.error));
+  assert.equal(outlines[0].pages, 7);
+  assert.equal(outlines[0].sections_required, 9);
+  const report = job.analysis.report;
+  assert.equal(report.source, 'ai');
+  assert.equal(report.pages, 7, 'the PDF is fitted to the pages asked for');
+  assert.ok(report.sections.every(section => section.paragraphs.every(text => !text.includes('73%'))), 'numbers nobody computed never reach the report');
+  assert.ok(report.sections.every(section => new Set(section.paragraphs).size === section.paragraphs.length), 'the extra pass adds no repeats');
+  const table = report.tables['Q-001'];
+  assert.deepEqual(table.rows.map(row => row.slice(0, 2)), [['South', 20], ['North', 10]], 'cited results come with their computed table');
+});
 
 test('follow-up questions are planned, computed and answered from the results', async t => {
   const llm = { name: 'fake', model: 'fake', async generateJson(input) {

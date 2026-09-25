@@ -40,7 +40,13 @@ export interface DatasetAnalysis {
   generated_at: string; summary: string; kpis: DatasetKpi[]; insights: DatasetInsight[];
   profiles: SheetProfile[]; charts: DatasetChart[];
   /** source 'ai': written by the model for this file (every number checked); otherwise the computed outline. */
-  report: { source?: 'ai'; title?: string; sections: { id: string; title: string; paragraphs: string[]; evidence_ids: string[] }[] };
+  report: {
+    source?: 'ai'; title?: string; sections: { id: string; title: string; paragraphs: string[]; evidence_ids: string[] }[];
+    /** Pages asked for in the objective; the PDF is fitted to it. */
+    pages?: number | null;
+    /** Cited results exactly as computed, shown under the sections that cite them. */
+    tables?: Record<string, { id: string; title: string; headers: string[]; rows: (string | number | null)[][]; note?: string }>;
+  };
   ai?: DatasetAI;
   dashboard?: DashboardSpec | null;
   /** What the agent computed for the upload objective (or the default overview when none was given). */

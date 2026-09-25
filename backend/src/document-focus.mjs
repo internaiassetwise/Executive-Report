@@ -80,15 +80,41 @@ export async function analyzeDocumentFocus(document, objective, { llm, signal } 
   }
 }
 
-/** Add one printable page to the existing deterministic BOQ report. */
+// Text that fits one A4 page of the engine report (12.5px body, headings and spacing included).
+export const REPORT_PAGE_CHARS = 3000;
+
+/** Pages in an engine report (one footer "หน้า x / y" per page). */
+export function reportPageCount(html) {
+  return [...String(html).matchAll(/<div class="foot">หน้า \d+ \/ \d+<\/div>/g)].length;
+}
+
+/** Add the answer to the existing deterministic BOQ report, on as many A4 pages as it needs. */
 export function renderFocusedReportHtml(original, focus, heading = 'วิเคราะห์ตามโจทย์ที่ระบุ') {
   if (!focus || !['complete', 'partial', 'unsupported'].includes(focus.status)) return original;
-  const footers = [...original.matchAll(/<div class="foot">หน้า \d+ \/ \d+<\/div>/g)];
-  if (!footers.length || !original.includes('</body>')) return original;
-  const total = footers.length + 1;
+  const existing = reportPageCount(original);
+  if (!existing || !original.includes('</body>')) return original;
+  const block = (html, text) => ({ html, size: String(text).length + 80 });
+  const blocks = [block(`<p>${escapeHtml(focus.summary)}</p>`, focus.summary || '')];
+  for (const section of focus.sections || []) {
+    blocks.push(block(`<h3>${escapeHtml(section.title)}</h3>`, section.title), ...section.paragraphs.map(text => block(`<p>${escapeHtml(text)}</p>`, text)));
+  }
+  if (focus.evidence?.length) {
+    blocks.push(block('<h3>หลักฐานจากตัวเลขที่คำนวณ</h3>', ''), ...focus.evidence.map(item => block(`<ul><li>${escapeHtml(item.statement)}</li></ul>`, item.statement)));
+  }
+  blocks.push(block('<p class="note">บทวิเคราะห์นี้อ้างอิงเฉพาะข้อมูลที่คำนวณจากไฟล์ โปรดตรวจทานร่วมกับขอบเขตงานและสเปก</p>', ''));
+  // Fill each page up to its size; a heading never ends a page on its own.
+  const pages = [[]];
+  let used = 300;
+  blocks.forEach((item, index) => {
+    const next = blocks[index + 1];
+    const needed = item.size + (item.html.startsWith('<h3>') && next ? next.size : 0);
+    if (pages.at(-1).length && used + needed > REPORT_PAGE_CHARS) { pages.push([]); used = 0; }
+    pages.at(-1).push(item.html);
+    used += item.size;
+  });
+  const total = existing + pages.length;
   const updated = original.replace(/(<div class="foot">หน้า \d+ \/ )\d+(<\/div>)/g, (_match, before, after) => `${before}${total}${after}`);
-  const evidence = focus.evidence?.length ? `<h3>หลักฐานจากตัวเลขที่คำนวณ</h3><ul>${focus.evidence.map(item => `<li>${escapeHtml(item.statement)}</li>`).join('')}</ul>` : '';
-  const sections = (focus.sections || []).map(section => `<h3>${escapeHtml(section.title)}</h3>${section.paragraphs.map(text => `<p>${escapeHtml(text)}</p>`).join('')}`).join('');
-  const page = `<section class="page"><div class="run">${escapeHtml(heading)}</div><h2>${escapeHtml(heading)}</h2><p class="note">โจทย์: ${escapeHtml(focus.objective)}</p><p>${escapeHtml(focus.summary)}</p>${sections}${evidence}<p class="note">บทวิเคราะห์นี้อ้างอิงเฉพาะข้อมูลที่คำนวณจากไฟล์ โปรดตรวจทานร่วมกับขอบเขตงานและสเปก</p><div class="foot">หน้า ${total} / ${total}</div></section>`;
-  return updated.replace('</body>', `${page}</body>`);
+  const html = pages.map((content, index) => `<section class="page"><div class="run">${escapeHtml(heading)}</div>${index === 0
+    ? `<h2>${escapeHtml(heading)}</h2><p class="note">โจทย์: ${escapeHtml(focus.objective)}</p>` : ''}${content.join('')}<div class="foot">หน้า ${existing + index + 1} / ${total}</div></section>`).join('');
+  return updated.replace('</body>', `${html}</body>`);
 }

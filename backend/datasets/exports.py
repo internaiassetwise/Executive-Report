@@ -11,6 +11,7 @@ Linux packages commonly provide fonts-noto-core. Fonts are embedded, not bundled
 from __future__ import annotations
 
 import csv
+import io
 import json
 import math
 import os
@@ -294,6 +295,7 @@ def export_pdf(dataset, analysis, output):
         "title": ParagraphStyle("Title", fontName=bold, fontSize=26, leading=35, textColor=navy, spaceAfter=16, shaping=1),
         "h1": ParagraphStyle("H1", fontName=bold, fontSize=15, leading=23, textColor=navy, spaceBefore=18, spaceAfter=8, keepWithNext=True, shaping=1),
         "body": ParagraphStyle("Body", fontName=regular, fontSize=10, leading=17, textColor=colors.HexColor("#22364B"), spaceAfter=8, shaping=1, splitLongWords=True),
+        "flow": ParagraphStyle("Flow", fontName=regular, fontSize=10, leading=17, textColor=colors.HexColor("#22364B"), spaceAfter=0, shaping=1, splitLongWords=True),
         "small": ParagraphStyle("Small", fontName=regular, fontSize=8, leading=13, textColor=muted, spaceAfter=5, shaping=1),
         "cell": ParagraphStyle("Cell", fontName=regular, fontSize=8, leading=13, textColor=colors.HexColor("#22364B"), shaping=1),
         "header": ParagraphStyle("Header", fontName=bold, fontSize=8, leading=13, textColor=colors.white, shaping=1),
@@ -301,53 +303,104 @@ def export_pdf(dataset, analysis, output):
     def paragraph(value, kind="body"):
         return Paragraph(escape(clean_text(value)).replace("\n", "<br/>"), styles[kind])
 
-    def table(headers, rows, widths):
+    def prose(value, size=500):
+        """A long paragraph as short unbreakable pieces: reportlab cannot always split shaped Thai
+        across a page, so each piece moves whole to the next page. Pieces break at the spaces
+        between Thai phrases and follow each other without a gap."""
+        pieces, current = [], ""
+        for word in clean_text(value).split(" "):
+            if current and len(current) + len(word) + 1 > size:
+                pieces.append(current)
+                current = word
+            else:
+                current = f"{current} {word}" if current else word
+        pieces.append(current)
+        pieces = [piece for piece in pieces if piece]
+        return [KeepTogether([paragraph(piece, "body" if index == len(pieces) - 1 else "flow")]) for index, piece in enumerate(pieces)]
+
+    def table(headers, rows, widths, compact=False):
         contents = [[paragraph(value, "header") for value in headers]]
         contents.extend([paragraph(display(value), "cell") for value in row] for row in rows)
         result = Table(contents, colWidths=widths, repeatRows=1, hAlign="LEFT", splitByRow=1)
+        padding = 3 if compact else 7
         result.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), navy),
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F0F4F8")]),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-            ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ("TOPPADDING", (0, 0), (-1, -1), padding), ("BOTTOMPADDING", (0, 0), (-1, -1), padding),
             ("LINEBELOW", (0, -1), (-1, -1), .5, colors.HexColor("#DAE3EC")),
         ]))
         return result
 
     width, height = A4
     usable = width - 92
-    story = [paragraph(BRAND, "title"), paragraph("รายงานวิเคราะห์ข้อมูล", "h1"), paragraph(dataset["filename"]), paragraph(f"วันที่วิเคราะห์: {analysis.get('generated_at', '')}", "small"), Spacer(1, 10)]
-    story.append(table(["แถวข้อมูล", "คอลัมน์รวมทุกชีต", "ชีต"], [[dataset.get("rows_count"), dataset.get("columns_count"), len(dataset["sheets"])]], [usable / 3] * 3))
-    story.extend([Spacer(1, 15), paragraph(analysis.get("summary", ""))])
+    report = analysis.get("report") or {}
+    tables = report.get("tables") or {}
 
-    for section in (analysis.get("report") or {}).get("sections", []):
-        story.append(paragraph(section.get("title", ""), "h1"))
-        story.extend(paragraph(value) for value in section.get("paragraphs", []))
-        if section.get("evidence_ids"):
-            story.append(paragraph("หลักฐาน: " + ", ".join(section["evidence_ids"]), "small"))
+    # Each part is built fresh on every call: fitting the page count builds the document more than once.
+    def front():
+        story = [paragraph(BRAND, "title"), paragraph(report.get("title") or "รายงานวิเคราะห์ข้อมูล", "h1"), paragraph(dataset["filename"]), paragraph(f"วันที่วิเคราะห์: {analysis.get('generated_at', '')}", "small"), Spacer(1, 10)]
+        story.append(table(["แถวข้อมูล", "คอลัมน์รวมทุกชีต", "ชีต"], [[dataset.get("rows_count"), dataset.get("columns_count"), len(dataset["sheets"])]], [usable / 3] * 3))
+        if report.get("source") != "ai":
+            story.extend([Spacer(1, 15), paragraph(analysis.get("summary", ""))])
+        return story
 
-    kpis = analysis.get("kpis", [])
-    if kpis:
-        story.extend([paragraph("ตัวชี้วัดและวิธีคำนวณ", "h1"), table(["ตัวชี้วัด / แหล่งข้อมูล", "ค่า", "วิธีคำนวณ"], [[f"{item.get('name', '')}\n{(item.get('source') or {}).get('sheet', '')}", item.get("formatted_value", item.get("value")), item.get("method")] for item in kpis], [usable * .35, usable * .2, usable * .45])])
-    if analysis.get("insights"):
-        story.append(paragraph("หลักฐานประกอบข้อค้นพบ", "h1"))
-        for item in analysis["insights"]:
+    # One table per section: the first cited result that was computed as a table.
+    section_tables = [next((tables[value] for value in section.get("evidence_ids", []) if value in tables), None) for section in report.get("sections", [])]
+    table_order = [index for index, found in enumerate(section_tables) if found]
+
+    def body(table_count):
+        """The written sections; the tables of the first table_count sections that have one."""
+        shown = set(table_order[:table_count])
+        story = []
+        for index, section in enumerate(report.get("sections", [])):
+            story.append(paragraph(section.get("title", ""), "h1"))
+            for value in section.get("paragraphs", []):
+                story.extend(prose(value))
+            # The result the section cites, exactly as computed, under the text that discusses it.
+            if index in shown:
+                result = section_tables[index]
+                columns = len(result["headers"])
+                first = usable * (.4 if columns > 2 else .6)
+                note = result.get("note") or (f"แสดง 10 จาก {len(result['rows'])} แถว" if len(result["rows"]) > 10 else "")
+                story.append(KeepTogether([Spacer(1, 2), paragraph(result["title"], "small"),
+                                           table(result["headers"], result["rows"][:10], [first] + [(usable - first) / (columns - 1)] * (columns - 1), compact=True),
+                                           *([paragraph(note, "small")] if note else []), Spacer(1, 6)]))
+        return story
+
+    def kpi_block():
+        kpis = analysis.get("kpis", [])
+        return [paragraph("ตัวชี้วัดและวิธีคำนวณ", "h1"), table(["ตัวชี้วัด / แหล่งข้อมูล", "ค่า", "วิธีคำนวณ"], [[f"{item.get('name', '')}\n{(item.get('source') or {}).get('sheet', '')}", item.get("formatted_value", item.get("value")), item.get("method")] for item in kpis], [usable * .35, usable * .2, usable * .45])] if kpis else []
+
+    def insight_block(index):
+        def build():
+            item = analysis["insights"][index]
             evidence = item.get("evidence") or {}
-            story.append(paragraph(f"{item.get('id', '')} | {item.get('title', '')}", "h1"))
-            story.append(paragraph(item.get("description", "")))
-            story.append(paragraph(f"{evidence.get('sheet', '')} | {evidence.get('metric', '')}: {display(evidence.get('value'))}\n{evidence.get('method', '')}", "small"))
+            return ([paragraph("หลักฐานประกอบข้อค้นพบ", "h1")] if index == 0 else []) + [
+                paragraph(f"{item.get('title', '')}", "h1"), *prose(item.get("description", "")),
+                paragraph(f"{evidence.get('sheet', '')} | {evidence.get('metric', '')}: {display(evidence.get('value'))}\n{evidence.get('method', '')}", "small")]
+        return build
 
-    profiles = analysis.get("profiles", [])
-    if profiles:
-        story.extend([paragraph("คุณภาพข้อมูลแยกตามชีต", "h1"), table(["ชีต", "แถว", "แถวซ้ำ", "เซลล์ว่าง", "ว่าง (%)"], [[p.get("sheet_name"), p.get("rows_count"), p.get("duplicate_rows"), p.get("missing_count"), p.get("missing_percentage")] for p in profiles], [usable * .36] + [usable * .16] * 4)])
-    story.append(paragraph("แหล่งข้อมูลและขอบเขตการวิเคราะห์", "h1"))
-    story.append(paragraph(f"แหล่งข้อมูล: {dataset['filename']}"))
-    story.append(paragraph("สถิติคำนวณจากทุกแถวข้อมูลที่จัดเก็บ โดยวิเคราะห์แต่ละชีตแยกกัน ไม่รวมข้อมูลต่างชีตโดยสมมติความสัมพันธ์เอง เซลล์สูตรต้นทางเก็บเป็นข้อความและไม่คำนวณซ้ำ ดาวน์โหลด Excel เพื่อดูรายละเอียดคอลัมน์ กราฟ และข้อมูลครบทุกแถว หรือ CSV สำหรับข้อมูลของชีตที่เลือก"))
-    for source in dataset["sheets"]:
-        story.append(paragraph(f"{source['name']}: {source['rows_count']:,} แถว / {len(source['columns'])} คอลัมน์", "small"))
-        story.extend(paragraph(warning, "small") for warning in source.get("warnings", []))
-    story.extend(paragraph(warning, "small") for warning in dataset.get("warnings", []))
+    def quality_block():
+        profiles = analysis.get("profiles", [])
+        return [paragraph("คุณภาพข้อมูลแยกตามชีต", "h1"), table(["ชีต", "แถว", "แถวซ้ำ", "เซลล์ว่าง", "ว่าง (%)"], [[p.get("sheet_name"), p.get("rows_count"), p.get("duplicate_rows"), p.get("missing_count"), p.get("missing_percentage")] for p in profiles], [usable * .36] + [usable * .16] * 4)] if profiles else []
+
+    def sources_block():
+        story = [paragraph("แหล่งข้อมูลและขอบเขตการวิเคราะห์", "h1"), paragraph(f"แหล่งข้อมูล: {dataset['filename']}"),
+                 paragraph("สถิติคำนวณจากทุกแถวข้อมูลที่จัดเก็บ โดยวิเคราะห์แต่ละชีตแยกกัน ไม่รวมข้อมูลต่างชีตโดยสมมติความสัมพันธ์เอง เซลล์สูตรต้นทางเก็บเป็นข้อความและไม่คำนวณซ้ำ ดาวน์โหลด Excel เพื่อดูรายละเอียดคอลัมน์ กราฟ และข้อมูลครบทุกแถว หรือ CSV สำหรับข้อมูลของชีตที่เลือก")]
+        for source in dataset["sheets"]:
+            story.append(paragraph(f"{source['name']}: {source['rows_count']:,} แถว / {len(source['columns'])} คอลัมน์", "small"))
+            story.extend(paragraph(warning, "small") for warning in source.get("warnings", []))
+        story.extend(paragraph(warning, "small") for warning in dataset.get("warnings", []))
+        return story
+
+    # The appendix in the order it is worth keeping when pages are limited.
+    appendix = [kpi_block, sources_block, quality_block, *[insight_block(index) for index in range(len(analysis.get("insights") or []))]]
+
+    def compose(count):
+        """The written report, then the first `count` optional parts: section tables, then appendix."""
+        return front() + body(count) + [flowable for block in appendix[:max(0, count - len(table_order))] for flowable in block()]
 
     def page_frame(canvas, document):
         canvas.saveState()
@@ -361,8 +414,26 @@ def export_pdf(dataset, analysis, output):
         canvas.drawRightString(width - 46, 26, str(document.page))
         canvas.restoreState()
 
-    document = SimpleDocTemplate(str(output), pagesize=A4, leftMargin=46, rightMargin=46, topMargin=42, bottomMargin=55, title=f"{BRAND} - {dataset['filename']}", author=BRAND, pageCompression=1)
-    document.build(story, onFirstPage=page_frame, onLaterPages=page_frame)
+    def build(target, count):
+        document = SimpleDocTemplate(target, pagesize=A4, leftMargin=46, rightMargin=46, topMargin=42, bottomMargin=55, title=f"{BRAND} - {dataset['filename']}", author=BRAND, pageCompression=1)
+        document.build(compose(count), onFirstPage=page_frame, onLaterPages=page_frame)
+        return document.page
+
+    count = len(table_order) + len(appendix)
+    pages = report.get("pages")
+    if isinstance(pages, int) and pages > 0:
+        # The length asked for: the written report always stays; section tables and then appendix
+        # parts are added in order while the document still fits (pages only grow as parts are added).
+        low, high = 0, count
+        if build(io.BytesIO(), high) > pages:
+            while low < high:
+                middle = (low + high + 1) // 2
+                if build(io.BytesIO(), middle) <= pages:
+                    low = middle
+                else:
+                    high = middle - 1
+            count = low
+    build(str(output), count)
 
 
 def export_dashboard_pdf(payload_path, output_path):

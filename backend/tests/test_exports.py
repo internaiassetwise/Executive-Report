@@ -90,9 +90,26 @@ class ExportTests(unittest.TestCase):
         self.assertGreaterEqual(len(reader.pages), 2)
         content = "\n".join(page.extract_text() for page in reader.pages)
         self.assertIn("ASW Data Insight", content)
-        self.assertIn("EV-001", content)
+        self.assertIn("CSV | rows: 4", content, "the evidence appendix is included")
+        self.assertNotIn("EV-001", content, "evidence ids are for checking, not for readers")
         self.assertIn("รายงาน", content)
         self.assertFalse(output.with_name(output.name + ".part").exists())
+
+
+    def test_pdf_has_the_pages_asked_for_and_cited_tables(self):
+        insight = self.analysis["insights"][0]
+        self.analysis["insights"] = [dict(insight, id=f"EV-{index:03d}") for index in range(1, 80)]
+        self.analysis["report"]["source"] = "ai"
+        self.analysis["report"]["tables"] = {"Q-001": {"id": "Q-001", "title": "ยอดตามวัสดุ", "headers": ["วัสดุ", "ผลรวม", "สัดส่วน (%)"], "rows": [["ปูน", 1200, 60.0], ["เหล็ก", 800, 40.0]], "note": ""}}
+        self.analysis["report"]["sections"][0]["evidence_ids"] = ["Q-001"]
+        for pages in (3, 5):
+            self.analysis["report"]["pages"] = pages
+            self.analysis_path.write_text(json.dumps(self.analysis, ensure_ascii=False), encoding="utf-8")
+            output = self.root / f"report-{pages}.pdf"
+            export_report(self.database, self.analysis_path, "pdf", output)
+            reader = PdfReader(output)
+            self.assertEqual(len(reader.pages), pages)
+            self.assertIn("1,200", reader.pages[0].extract_text() + reader.pages[1].extract_text(), "a cited result is shown as its table")
 
 
 if __name__ == "__main__":

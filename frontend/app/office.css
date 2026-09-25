@@ -142,6 +142,15 @@
 .answer-working{display:flex;align-items:center;gap:8px;margin:0;color:var(--office-muted)}
 .answer-note{margin:0;color:var(--office-muted);font-size:13px}
 
+/* Summary at the top of the dashboard */
+.overview{display:flex;flex-direction:column;gap:14px;padding:22px 24px;background:var(--office-surface);border:1px solid var(--office-border);border-left:3px solid var(--office-accent);border-radius:12px;overflow-wrap:anywhere}
+.overview-points{list-style:none;counter-reset:point;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 24px}
+.overview-points li{counter-increment:point;position:relative;display:flex;flex-direction:column;gap:2px;padding-left:30px}
+.overview-points li::before{content:counter(point);position:absolute;left:0;top:1px;display:grid;place-items:center;width:20px;height:20px;border-radius:50%;background:var(--office-accent-soft);color:var(--office-accent);font-size:12px;font-weight:600}
+.overview-points strong{font-size:14px;font-weight:600}
+.overview-points span{font-size:13px;line-height:1.65;color:var(--office-muted)}
+.overview .answer{padding:0;border:0;border-radius:0}
+
 /* Question thread and the pinned question bar */
 .thread{display:flex;flex-direction:column;gap:16px;max-width:980px;width:100%;margin:0 auto}
 .thread-empty{padding:40px 8px 8px;text-align:center}
@@ -190,7 +199,7 @@
   .start-intro h1{font-size:24px}
   .composer-drop{flex-wrap:wrap}.composer-drop small{margin-left:30px;flex-basis:100%}
   .composer-foot{flex-direction:column;align-items:stretch}.composer-foot .office-button{width:100%}
-  .answer{padding:18px 16px}.answer-charts{grid-template-columns:1fr}
+  .answer,.overview{padding:18px 16px}.answer-charts,.overview-points{grid-template-columns:1fr}
   .progress-steps{grid-template-columns:1fr}
   .office-brand strong{display:none}
   .askbar{padding:10px 12px 12px}

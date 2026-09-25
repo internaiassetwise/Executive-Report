@@ -64,6 +64,30 @@ function DocumentReport({ id, title, filename, version }: { id: string; title: s
   </>;
 }
 
+const RANK = { high: 0, medium: 1, low: 2 } as const;
+
+/** First thing on the dashboard: the summary, the key findings, and the answer to the objective if one was typed. */
+function OverviewSummary({ analysis }: { analysis: DatasetAnalysis }) {
+  const ai = analysis.ai?.status === 'complete' ? analysis.ai : null;
+  const question = analysis.answer?.question;
+  const summary = ai?.summary || analysis.summary;
+  const points = ai?.insights?.length
+    ? ai.insights.slice(0, 4).map(item => ({ title: item.title, text: item.description }))
+    : [...analysis.insights].sort((a, b) => RANK[a.importance] - RANK[b.importance]).slice(0, 4).map(item => ({ title: item.title, text: item.description }));
+  const kpis = question ? analysis.answer?.kpis || [] : [];
+  const charts = question ? analysis.answer?.charts || [] : [];
+  if (!summary && !points.length) return null;
+  return <section className="overview" aria-label="สรุป">
+    <header className="answer-head">
+      <span className="answer-eyebrow">{question ? 'สรุปตามโจทย์' : 'สรุปภาพรวม'}</span>
+      {question && <p className="answer-question">{question}</p>}
+    </header>
+    {summary && <p className="answer-summary">{summary}</p>}
+    {points.length > 0 && <ol className="overview-points">{points.map((point, index) => <li key={index}><strong>{point.title}</strong><span>{point.text}</span></li>)}</ol>}
+    {(kpis.length > 0 || charts.length > 0) && <AnswerView answer={{ kpis, charts }} />}
+  </section>;
+}
+
 /** Follow-up questions and their answers, oldest first, with ideas to start from. */
 function Questions({ conversation, pending, error, suggestions, onAsk, disabled }: { conversation: AgentAnswer[]; pending: string | null; error: string; suggestions: string[]; onAsk: (question: string) => void; disabled: boolean }) {
   const end = useRef<HTMLDivElement>(null);
@@ -98,11 +122,6 @@ export function DatasetResults({ id, dataset, analysis, boq, document, conversat
   const [pending, setPending] = useState<string | null>(null);
   const [askError, setAskError] = useState('');
   const sheets = dataset.sheets.filter(sheet => !sheet.combined_from).length;
-  const upload = analysis?.answer;
-  // The general dashboard shows the upload objective's answer above it; construction files show theirs inside.
-  const objectiveAnswer = !construction && upload?.question ? {
-    summary: analysis?.ai?.status === 'complete' ? analysis.ai.summary : '', charts: upload.charts, kpis: upload.kpis,
-  } : null;
 
   async function download(format: 'pdf' | 'xlsx') {
     if (exporting) return;
@@ -141,9 +160,9 @@ export function DatasetResults({ id, dataset, analysis, boq, document, conversat
     {!analysis && <section className="office-card office-empty"><h2>ยังไม่ได้วิเคราะห์ไฟล์นี้</h2><p>ระบบจะคำนวณตัวเลข และสร้างแดชบอร์ดกับรายงานให้อัตโนมัติ</p><button className="office-button primary" disabled={retrying} onClick={() => void onAnalyze('')}>วิเคราะห์ข้อมูล</button></section>}
 
     {tab === 'dashboard' && <>
-      {objectiveAnswer && <AnswerView answer={objectiveAnswer} question={upload?.question} heading="คำตอบตามโจทย์" />}
+      {!construction?.dashboard && analysis && <OverviewSummary analysis={analysis} />}
       {construction?.dashboard && <DocumentDashboard id={id} dataset={dataset} document={construction} />}
-      {!construction?.dashboard && analysis?.dashboard && <DashboardView id={id} dataset={dataset} analysis={analysis} spec={analysis.dashboard} hideSummary={Boolean(objectiveAnswer?.summary)} />}
+      {!construction?.dashboard && analysis?.dashboard && <DashboardView id={id} dataset={dataset} analysis={analysis} spec={analysis.dashboard} hideSummary />}
       {!construction?.dashboard && analysis && !analysis.dashboard && <>
         <div className="insight-kpis">{analysis.kpis.map(kpi => <section key={kpi.id}><span>{kpi.name}</span><strong>{kpi.formatted_value || num(kpi.value)}</strong><small>{kpi.source.sheet}</small></section>)}</div>
         {analysis.charts.length > 0 && <div className="insight-chart-grid">{analysis.charts.map(chart => <ChartPanel key={chart.id} chart={chart} />)}</div>}

@@ -60,6 +60,7 @@ function TraceLine({ trace }: { trace?: ValueTrace }) {
   return <em className={`dash-trace${trace.from_image ? ' warn' : ''}`} title={`ที่มา: ${where} · ${detail}`}>ที่มา {where} · {detail}</em>;
 }
 
+/** hideSummary: the page already shows the summary and key findings above; this sheet's own findings still show for other sheets. */
 export function DashboardView({ id, dataset, analysis, spec: planned, hideSummary = false }: { id: string; dataset: Dataset; analysis: DatasetAnalysis; spec: DashboardSpec; hideSummary?: boolean }) {
   const [sheetId, setSheetId] = useState(planned.sheet_id);
   const [filters, setFilters] = useState<DashboardFilter[]>([]);
@@ -211,7 +212,7 @@ export function DashboardView({ id, dataset, analysis, spec: planned, hideSummar
       })}
     </section>
 
-    {insights.length > 0 && <section className="dash-insights" aria-label="ข้อสังเกตสำคัญ">
+    {insights.length > 0 && !(hideSummary && sheetId === planned.sheet_id) && <section className="dash-insights" aria-label="ข้อสังเกตสำคัญ">
       <div className="dash-section-head"><h3><Lightbulb size={17} aria-hidden="true" />ข้อสังเกตสำคัญ</h3><span>สรุปจากข้อมูลทั้งไฟล์ · ไม่เปลี่ยนตามตัวกรอง</span></div>
       {!hideSummary && summary?.summary && sheetId === planned.sheet_id && <p className="dash-summary">{summary.summary}</p>}
       <ol>{insights.map((item, index) => <li key={index}><strong>{item.title}</strong><p>{item.description}</p>

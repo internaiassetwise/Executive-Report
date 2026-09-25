@@ -48,6 +48,8 @@ export interface Dataset {
   warnings: string[];
   created_at: string;
   workbook?: WorkbookFacts;
+  /** Set when the upload was another format (pdf, docx, png, ...) converted to a workbook. */
+  converted_from?: string;
 }
 export interface DatasetJob {
   id: string;

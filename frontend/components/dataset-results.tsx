@@ -149,7 +149,7 @@ export function DatasetResults({ id, dataset, analysis, boq, document, conversat
     <header className="results-head">
       <div>
         <h1>{dataset.filename}</h1>
-        <p>{[construction?.label, `${num(dataset.rows_count)} แถว`, `${sheets} ชีต`].filter(Boolean).join(' · ')}</p>
+        <p>{[construction?.label, `${num(dataset.rows_count)} แถว`, `${sheets} ${dataset.converted_from ? 'ตาราง' : 'ชีต'}`, dataset.converted_from && `แปลงจากไฟล์ ${dataset.converted_from.toUpperCase()}`].filter(Boolean).join(' · ')}</p>
       </div>
       <nav className="results-tabs" aria-label="มุมมอง">
         {tabs.map(({ id: value, label, Icon }) => <button key={value} className={tab === value ? 'active' : ''} aria-current={tab === value ? 'page' : undefined} onClick={() => setTab(value)}><Icon size={16} aria-hidden="true" />{label}</button>)}

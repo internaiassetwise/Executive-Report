@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { extname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { analyzeWithAi, DEFAULT_DATASET_MODEL } from './dataset-ai.mjs';
 import { renderDashboardHtml } from './dashboard-html.mjs';
@@ -93,6 +93,12 @@ const mimeTypes = {
   '.xlsx': new Set(['', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/octet-stream']),
   '.xls': new Set(['', 'application/vnd.ms-excel', 'application/x-msexcel', 'application/x-excel', 'application/octet-stream']),
 };
+// Read as CSV (the reader detects tab, semicolon and pipe delimiters).
+const TEXT_TABLES = new Set(['.tsv', '.txt']);
+// Converted to .xlsx first (datasets/convert.py); their content, not the browser's MIME type, is checked.
+const CONVERTED = new Set(['.xlsm', '.xltx', '.xltm', '.xlsb', '.ods', '.docx', '.pdf', '.html', '.htm', '.xml', '.json', '.jsonl', '.ndjson', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff']);
+const ZIPPED = new Set(['.xlsx', '.xlsm', '.xltx', '.xltm', '.xlsb', '.ods', '.docx']);
+export const ACCEPTED_EXTENSIONS = [...Object.keys(mimeTypes), ...TEXT_TABLES, ...CONVERTED];
 
 export function createDatasetService(options = {}) {
   const config = { ...defaults, ...options };
@@ -290,7 +296,8 @@ export function createDatasetService(options = {}) {
     return new Response(bytes, { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${ascii}"; filename*=UTF-8''${encodedName}`, 'Content-Length': String(bytes.length), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
   }
 
-  async function readLayouts(job, input, filename, directory) {
+  /** pictures: the file is photos or scanned pages, so each picture gets its own reading. */
+  async function readLayouts(job, input, filename, directory, { pictures = false } = {}) {
     if (!config.llm) return [];
     const samplePath = join(directory, 'sample.json');
     const layoutPath = join(directory, 'layout.json');
@@ -301,13 +308,14 @@ export function createDatasetService(options = {}) {
       // Table positions and the pictures' contents are read in parallel; either may fail alone.
       const [layouts, images] = await Promise.allSettled([
         planLayouts(sample, config.llm, job.controller.signal),
-        describeImages(sample.images, config.llm, job.controller.signal),
+        describeImages(sample.images, config.llm, job.controller.signal, { pages: pictures }),
       ]);
       if (job.controller.signal.aborted) throw job.controller.signal.reason;
       for (const [name, outcome] of [['layout', layouts], ['images', images]]) {
         if (outcome.status === 'rejected') console.warn(JSON.stringify({ event: `${name}_fallback`, reason: outcome.reason?.kind || outcome.reason?.code || 'error' }));
       }
       const plan = { layouts: layouts.value || {}, images: images.value || [] };
+      job.pictureTables = plan.images.filter(note => note.table).length;
       if (!Object.keys(plan.layouts).length && !plan.images.length) return [];
       await writeFile(layoutPath, JSON.stringify(plan), { mode: 0o600 });
       return [layoutPath];
@@ -492,16 +500,17 @@ export function createDatasetService(options = {}) {
       const objective = objectiveEntry ? objectiveEntry[1].trim() : '';
       const filename = sanitizeFilename(file.name);
       const extension = extname(filename).toLowerCase();
-      if (!Object.hasOwn(mimeTypes, extension)) throw fail('UNSUPPORTED_FORMAT', 'รองรับเฉพาะไฟล์ .csv, .xlsx และ .xls', 415);
-      if (!mimeTypes[extension].has(file.type.toLowerCase())) throw fail('INVALID_MIME_TYPE', 'ชนิดข้อมูลในไฟล์ไม่ตรงกับนามสกุล CSV/XLSX', 415);
+      if (!ACCEPTED_EXTENSIONS.includes(extension)) throw fail('UNSUPPORTED_FORMAT', extension === '.doc' ? 'ไฟล์ Word รุ่นเก่า (.doc) กรุณาบันทึกเป็น .docx แล้วอัปโหลดใหม่' : 'ยังไม่รองรับไฟล์ชนิดนี้ รองรับ Excel, CSV, PDF, Word (.docx), รูปภาพ, ODS, HTML, XML และ JSON', 415);
+      if (Object.hasOwn(mimeTypes, extension) && !mimeTypes[extension].has(file.type.toLowerCase())) throw fail('INVALID_MIME_TYPE', 'ชนิดข้อมูลในไฟล์ไม่ตรงกับนามสกุล CSV/XLSX', 415);
       if (file.size === 0) throw fail('EMPTY_FILE', 'ไฟล์ว่าง กรุณาเลือกไฟล์ที่มีข้อมูล');
       if (file.size > config.maxFileSize) throw fail('FILE_TOO_LARGE', 'ไฟล์มีขนาดเกินขีดจำกัดที่กำหนด', 413);
       const data = Buffer.from(await file.arrayBuffer());
       const zip = data.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
       const ole = data.subarray(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]));
-      // Many systems export HTML or XML with an .xls name; say so instead of a vague parse error.
-      if (extension === '.xls' && !ole) throw fail('INVALID_FILE', zip ? 'ไฟล์นี้เป็น Excel รุ่นใหม่ กรุณาเปลี่ยนนามสกุลเป็น .xlsx แล้วอัปโหลดใหม่' : 'ไฟล์ .xls นี้ไม่ใช่รูปแบบ Excel 97-2003 จริง กรุณาเปิดใน Excel แล้วบันทึกเป็น .xlsx ก่อนอัปโหลด');
-      if ((extension === '.xlsx' && !zip) || (extension === '.csv' && (zip || ole))) throw fail('INVALID_FILE', 'เนื้อหาไฟล์ไม่ตรงกับนามสกุล หรือไฟล์เสียหาย');
+      const pdf = data.subarray(0, 5).equals(Buffer.from('%PDF-'));
+      if ((ZIPPED.has(extension) && !zip) || (extension === '.pdf' && !pdf) || (['.csv', ...TEXT_TABLES].includes(extension) && (zip || ole))) throw fail('INVALID_FILE', 'เนื้อหาไฟล์ไม่ตรงกับนามสกุล หรือไฟล์เสียหาย');
+      // Many systems export HTML or XML (or a real .xlsx) with an .xls name: those are converted.
+      const convert = CONVERTED.has(extension) || (extension === '.xls' && !ole);
       if (closed) throw fail('UNAVAILABLE', 'เซิร์ฟเวอร์กำลังปิด กรุณาลองอีกครั้ง', 503);
       const root = await getRoot();
       directory = await mkdtemp(join(root, 'dataset-'));
@@ -514,20 +523,37 @@ export function createDatasetService(options = {}) {
       jobs.set(id, job);
       job.finished = (async () => {
         try {
+          // Other formats become an .xlsx first; from here on every file is read the same way.
+          // The worker picks its reader from the name, so the working name carries that format.
+          let source = input;
+          let workName = TEXT_TABLES.has(extension) ? `${basename(filename, extension)}.csv` : filename;
+          let pictures = false;
+          if (convert) {
+            job.stage = 'reading';
+            const converted = join(directory, 'converted.xlsx');
+            const outcome = await worker(job, ['convert', input, filename, converted], undefined, config.timeoutMs, job.controller.signal);
+            if (outcome.kind !== 'xls') { source = converted; workName = `${basename(filename, extension)}.xlsx`; }
+            // Photos and scanned pages have no cells: only the picture reader can find their tables.
+            pictures = outcome.kind === 'pictures';
+            if (pictures && !config.llm) throw fail('AI_REQUIRED', 'ไฟล์นี้เป็นรูปภาพหรือ PDF สแกน ต้องเปิดใช้ AI บนเซิร์ฟเวอร์เพื่ออ่านตาราง', 422);
+            job.convertedFrom = extension.slice(1);
+          }
           // Where the tables are is read from a sample of the first rows; every row is
           // then loaded by Python. Without a provider the rule-based reader decides.
-          const layoutArgs = await readLayouts(job, input, filename, directory);
-          const result = await worker(job, ['ingest', input, database, filename, JSON.stringify(limits), ...layoutArgs], event => {
+          const layoutArgs = await readLayouts(job, source, workName, directory, { pictures });
+          if (pictures && !job.pictureTables) throw fail('NO_TABLE', 'อ่านตารางจากรูปภาพไม่สำเร็จ กรุณาใช้ภาพที่คมชัด ตรง และเห็นตารางทั้งหมด หรืออัปโหลดไฟล์ต้นฉบับ (Excel/PDF ที่มีข้อความ)', 422);
+          const result = await worker(job, ['ingest', source, database, workName, JSON.stringify(limits), ...layoutArgs], event => {
             if (!jobs.has(id)) return;
             if (['reading', 'validating', 'understanding_columns', 'detecting_types', 'preview'].includes(event.stage)) job.stage = event.stage;
             job.progress = Math.max(job.progress, Math.min(config.autoAnalyze ? 35 : 99, Math.max(0, config.autoAnalyze ? 5 + event.progress * 0.3 : event.progress)));
           }, config.timeoutMs, job.controller.signal);
-          if (jobs.has(id)) job.dataset = result;
+          // The user sees the name they uploaded, and where the table came from when it was converted.
+          if (jobs.has(id)) job.dataset = { ...result, filename, ...(job.convertedFrom ? { converted_from: job.convertedFrom } : {}) };
           // A BOQ comparison workbook also gets the benchmark report; it needs the original file.
           if (jobs.has(id)) {
             // What kind of document this is; construction cost documents also get their
             // dashboard figures and A4 report. A failure leaves the file a general one.
-            const found = await worker(job, [database, input, filename, directory], undefined, config.timeoutMs, job.controller.signal, documentWorkerPath).catch(error => { if (job.controller.signal.aborted) throw error; return null; });
+            const found = await worker(job, [database, source, workName, directory, filename], undefined, config.timeoutMs, job.controller.signal, documentWorkerPath).catch(error => { if (job.controller.signal.aborted) throw error; return null; });
             if (found?.type && found.type !== 'general') {
               job.document = { type: found.type, label: found.label, headline: found.headline || '', dashboard: found.dashboard || null,
                 sheet_id: found.sheet_id || null, html: found.report ? join(directory, found.report) : null,
@@ -538,6 +564,7 @@ export function createDatasetService(options = {}) {
             }
           }
           await rm(input, { force: true });
+          if (source !== input) await rm(source, { force: true });
           if (!jobs.has(id)) return;
           if (config.autoAnalyze) await analyzeDataset(job, objective);
           else { job.status = 'ready'; job.stage = 'preview'; job.progress = 100; }
@@ -670,7 +697,7 @@ export function createDatasetService(options = {}) {
       const origin = request.headers.get('origin');
       if ((origin !== null || !['GET', 'HEAD'].includes(request.method)) && !allowedOrigins.has(origin)) throw fail('ORIGIN_NOT_ALLOWED', 'Origin not allowed', 403);
       if (url.pathname === '/api/datasets/config' && request.method === 'GET') {
-        return reply({ max_file_size: config.maxFileSize, accepted_extensions: ['.csv', '.xlsx', '.xls'], ...limits, retention_minutes: config.retentionMinutes, auto_analyze: config.autoAnalyze, ai: { configured: Boolean(config.llm || config.apiKey), model: config.llm?.model || config.model || DEFAULT_DATASET_MODEL } });
+        return reply({ max_file_size: config.maxFileSize, accepted_extensions: ACCEPTED_EXTENSIONS, ...limits, retention_minutes: config.retentionMinutes, auto_analyze: config.autoAnalyze, ai: { configured: Boolean(config.llm || config.apiKey), model: config.llm?.model || config.model || DEFAULT_DATASET_MODEL } });
       }
       if (url.pathname === '/api/datasets') {
         if (request.method === 'POST') { await sweep(); return await upload(request); }

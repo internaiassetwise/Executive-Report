@@ -934,8 +934,10 @@ def combine_sheets(connection, result):
     column and, when names follow PREFIX_SUFFIX, a "กลุ่มชีต" column. Summary
     rows stay out; source sheets are untouched and dataset totals ignore it."""
     groups = {}
+    # Pages of a scanned table stack like sheets; pictures beside real cells do not.
+    pictures_only = all(sheet.get("source") == "image_ocr" for sheet in result["sheets"])
     for sheet in result["sheets"]:
-        if sheet.get("source") == "image_ocr" or sheet.get("pivot"):
+        if (sheet.get("source") == "image_ocr" and not pictures_only) or sheet.get("pivot"):
             continue
         signature = tuple(column["name"].casefold() for column in sheet["columns"])
         if len(signature) >= 2:
@@ -1060,6 +1062,9 @@ def main():
         elif len(sys.argv) == 4 and sys.argv[1] == "dashboard":
             from dashboard import run
             result = run(sys.argv[2], json.loads(Path(sys.argv[3]).read_text(encoding="utf-8")))
+        elif len(sys.argv) == 5 and sys.argv[1] == "convert":
+            from convert import convert
+            result = convert(sys.argv[2], sys.argv[3], sys.argv[4])
         elif len(sys.argv) == 4 and sys.argv[1] == "query":
             from query import run as run_queries
             result = run_queries(sys.argv[2], json.loads(Path(sys.argv[3]).read_text(encoding="utf-8")))

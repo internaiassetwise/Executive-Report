@@ -430,9 +430,11 @@ def analyze(sqlite_path, progress=None):
             charts.append(sheet_charts)
             metrics.append(sheet_kpis)
         # The stacked "all sheets" table and pivot tables repeat source rows, and a table read
-        # from a picture is not cell data; overall totals skip them.
+        # from a picture is not cell data; overall totals skip them, unless pictures are all the
+        # file has (a photo or a scanned PDF).
+        pictures_only = all(sheet.get("source") == "image_ocr" for sheet in dataset["sheets"] if not sheet.get("combined_from"))
         originals = [profile for profile, sheet in zip(profiles, dataset["sheets"])
-                     if not sheet.get("combined_from") and not sheet.get("pivot") and sheet.get("source") != "image_ocr"]
+                     if not sheet.get("combined_from") and not sheet.get("pivot") and (pictures_only or sheet.get("source") != "image_ocr")]
         rows_count = sum(profile["rows_count"] for profile in originals)
         missing = sum(profile["missing_count"] for profile in originals)
         duplicates = sum(profile["duplicate_rows"] for profile in originals)

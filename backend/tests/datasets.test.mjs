@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createHandler } from '../src/app.mjs';
 import { createApiServer } from '../src/server.mjs';
-import { datasetConfigFromEnv, MULTIPART_OVERHEAD } from '../src/datasets.mjs';
+import { ACCEPTED_EXTENSIONS, datasetConfigFromEnv, MULTIPART_OVERHEAD } from '../src/datasets.mjs';
 
 const origin = 'http://localhost:3000';
 const pythonBin = process.env.PYTHON_BIN || 'python';
@@ -64,7 +64,8 @@ test('configuration uses validated environment limits and exposes no credentials
   const { handle } = await context(t, { maxFileSize: 1234 });
   const response = await handle(request('/config'));
   const body = await response.json();
-  assert.deepEqual(body, { max_file_size: 1234, accepted_extensions: ['.csv', '.xlsx', '.xls'], max_rows: 100000, max_columns: 200, max_cells: 2000000, retention_minutes: 60, auto_analyze: false, ai: { configured: false, model: 'gemini-3-flash-preview' } });
+  assert.deepEqual(body, { max_file_size: 1234, accepted_extensions: ACCEPTED_EXTENSIONS, max_rows: 100000, max_columns: 200, max_cells: 2000000, retention_minutes: 60, auto_analyze: false, ai: { configured: false, model: 'gemini-3-flash-preview' } });
+  assert.ok(['.pdf', '.docx', '.png', '.ods', '.json'].every(extension => ACCEPTED_EXTENSIONS.includes(extension)));
   assert.equal(response.headers.get('cache-control'), 'no-store');
 });
 
@@ -147,6 +148,36 @@ test('extension, type-specific MIME, signatures, empty files and multipart cardi
   form.append('file', new Blob(['a\n2']), 'two.csv');
   const response = await handle(request('', { method: 'POST', headers: { Origin: origin }, body: form }));
   assert.equal((await response.json()).error.code, 'SINGLE_FILE_REQUIRED');
+});
+
+test('other formats are converted on upload and keep the name the user gave', async t => {
+  const { handle } = await context(t);
+  const table = '<table><tr><th>team</th><th>amount</th></tr><tr><td>North</td><td>1,200</td></tr><tr><td>South</td><td>800</td></tr></table>';
+  for (const [content, name, type, from] of [
+    [`<html><body>${table}</body></html>`, 'export.xls', 'application/vnd.ms-excel', 'xls'],
+    [JSON.stringify([{ team: 'North', amount: 1200 }, { team: 'South', amount: 800 }]), 'data.json', 'application/json', 'json'],
+    ['team\tamount\nNorth\t1200\nSouth\t800\n', 'data.tsv', 'text/tab-separated-values', null],
+  ]) {
+    const id = await upload(handle, content, name, type);
+    const job = await finish(handle, id);
+    assert.equal(job.status, 'ready', `${name}: ${JSON.stringify(job.error)}`);
+    assert.equal(job.dataset.filename, name);
+    assert.equal(job.dataset.converted_from, from ?? undefined);
+    const page = await rows(handle, id);
+    assert.equal(page.total_rows, 2, name);
+  }
+  for (const [content, name, type, code] of [
+    ['not a pdf', 'scan.pdf', 'application/pdf', 'INVALID_FILE'],
+    ['plain', 'memo.docx', 'application/octet-stream', 'INVALID_FILE'],
+    ['x', 'old.doc', 'application/msword', 'UNSUPPORTED_FORMAT'],
+  ]) {
+    const response = await handle(fileRequest(content, name, type));
+    assert.equal((await response.json()).error.code, code, name);
+  }
+  // A photo needs the picture reader; without a provider the upload says so.
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC', 'base64');
+  const job = await finish(handle, await upload(handle, png, 'photo.png', 'image/png'));
+  assert.equal(job.error.code, 'AI_REQUIRED');
 });
 
 test('foreign and missing write origins are rejected and no dataset listing exists', async t => {

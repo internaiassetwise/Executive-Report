@@ -5,3 +5,7 @@ reportlab>=4.4,<5
 uharfbuzz>=0.50,<1
 # Retained for regression tests of the legacy XLS analysis engine.
 xlrd==2.0.2
+# Excel binary workbooks (.xlsb) for uploads.
+pyxlsb==1.0.10
+# PDF tables and scanned-page rendering for uploads.
+pdfplumber>=0.11,<0.12

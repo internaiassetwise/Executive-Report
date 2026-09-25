@@ -9,7 +9,7 @@ the dashboard figures and A4 report made for that kind.
 Every figure here is computed from the stored rows (or, for a benchmark file, by
 the BOQ engine on the original upload); no model is called.
 
-CLI: document.py <dataset.sqlite> <original upload> <filename> <out_dir>
+CLI: document.py <dataset.sqlite> <original upload> <filename> <out_dir> [name shown to the user]
 Prints one JSON line {"result": {...}} and writes report.html to out_dir.
 """
 from __future__ import annotations
@@ -201,8 +201,10 @@ def stated_total(entries):
 def classify(dataset, connection):
     """The table that best fits a construction cost document, and its kind."""
     best = None
+    # A table read from a picture counts only when pictures are all the file has (a photo or scan).
+    pictures_only = all(sheet.get("source") == "image_ocr" for sheet in dataset["sheets"] if not sheet.get("combined_from"))
     for sheet in dataset["sheets"]:
-        if sheet.get("combined_from") or sheet.get("source") == "image_ocr" or sheet.get("pivot"):
+        if sheet.get("combined_from") or (sheet.get("source") == "image_ocr" and not pictures_only) or sheet.get("pivot"):
             continue
         roles, priced = read_columns(sheet)
         if not roles["item"] or not priced:
@@ -497,19 +499,21 @@ def dashboard(facts):
             "source": {"sheet": facts.get("sheet"), "range": facts.get("range"), "filename": facts["filename"]}}
 
 
-def build(sqlite_path, input_path, filename, out_dir):
+def build(sqlite_path, input_path, filename, out_dir, display=None):
+    """filename picks the reader (a converted PDF or photo is read as .xlsx); display is what the user uploaded."""
+    display = display or filename
     report_path = Path(out_dir) / "report.html"
     # 1. Bids against a benchmark: the BOQ engine reads the original workbook.
     try:
         import analysis_engine
         import boq_engine
         import boq_report
-        engine = boq_engine.build_many([(analysis_engine.load_sheets(Path(input_path).read_bytes(), filename), filename)])
+        engine = boq_engine.build_many([(analysis_engine.load_sheets(Path(input_path).read_bytes(), filename), display)])
     except Exception:
         engine = None
     if engine is not None:
         report_path.write_text(boq_report.render(engine), encoding="utf-8")
-        facts = benchmark(engine, filename)
+        facts = benchmark(engine, display)
         return {"type": "benchmark", "label": LABELS["benchmark"], "headline": facts["headline"], "dashboard": dashboard(facts),
                 "report": report_path.name, "vendors": [v["vendor"] for v in engine["vendors"]], "benchmark": engine["vendors"][0].get("benchmark")}
     # 2. Bidders side by side, or one priced bill, from the stored tables.
@@ -522,7 +526,7 @@ def build(sqlite_path, input_path, filename, out_dir):
     if not found:
         return {"type": "general", "label": LABELS["general"]}
     import document_report
-    facts = comparison(found, filename) if found["kind"] == "comparison" else estimate(found, filename)
+    facts = comparison(found, display) if found["kind"] == "comparison" else estimate(found, display)
     report_path.write_text(document_report.render(facts), encoding="utf-8")
     return {"type": found["kind"], "label": LABELS[found["kind"]], "headline": facts["headline"], "dashboard": dashboard(facts),
             "report": report_path.name, "sheet_id": found["sheet"]["id"]}
@@ -531,7 +535,7 @@ def build(sqlite_path, input_path, filename, out_dir):
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    if len(sys.argv) != 5:
+    if len(sys.argv) not in (5, 6):
         print(json.dumps({"error": {"code": "INVALID_REQUEST", "message": "คำสั่งไม่ถูกต้อง"}}, ensure_ascii=False))
         return 1
     try:

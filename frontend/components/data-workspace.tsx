@@ -8,7 +8,6 @@ import { DatasetResults } from '@/components/dataset-results';
 import { ACCESS_REQUIRED_EVENT, analyzeDataset, DatasetError, getDatasetConfig, getDatasetJob, removeDataset, uploadDataset, type DatasetConfig, type DatasetJob } from '@/lib/datasets';
 
 const SESSION_KEY = 'ai-data-analyst:dataset';
-const EXAMPLES = ['ยอดค่าใช้จ่ายแยกตามโครงการ โครงการไหนสูงสุด', 'แนวโน้มรายเดือน มีเดือนไหนผิดปกติ', 'รายการ BOQ ที่ราคาสูงกว่าราคากลางมากที่สุด'];
 const processingSteps = [
   { key: 'uploading', th: 'อัปโหลดไฟล์' },
   { key: 'reading', th: 'อ่านข้อมูลทุกชีต' },
@@ -131,11 +130,11 @@ export function DataWorkspace() {
   function selectFiles(files: FileList | File[]) {
     setError('');
     setFile(null);
-    if (files.length !== 1) { setError('เลือกครั้งละ 1 ไฟล์ หากเป็น Excel ระบบจะอ่านทุกชีตในไฟล์ให้'); return; }
+    if (files.length !== 1) { setError('เลือกครั้งละ 1 ไฟล์ ระบบจะอ่านทุกชีต ทุกหน้า และทุกตารางในไฟล์ให้'); return; }
     const selected = files[0];
     if (!config) { setError('ยังเชื่อมต่อบริการข้อมูลไม่ได้ กรุณาลองอีกครั้ง'); return; }
     const extension = selected.name.slice(selected.name.lastIndexOf('.')).toLowerCase();
-    if (!config.accepted_extensions.includes(extension)) { setError(`รองรับ ${config.accepted_extensions.join(' และ ')} เท่านั้น กรุณาบันทึกไฟล์เป็นรูปแบบที่รองรับ`); return; }
+    if (!config.accepted_extensions.includes(extension)) { setError(extension === '.doc' ? 'ไฟล์ Word รุ่นเก่า (.doc) กรุณาบันทึกเป็น .docx แล้วอัปโหลดใหม่' : 'ยังไม่รองรับไฟล์ชนิดนี้ รองรับ Excel, CSV, PDF, Word (.docx), รูปภาพ, ODS, HTML, XML และ JSON'); return; }
     if (!selected.size) { setError('ไฟล์นี้ว่าง กรุณาเลือกไฟล์ที่มีหัวคอลัมน์และแถวข้อมูล'); return; }
     if (selected.size > config.max_file_size) { setError(`ไฟล์ใหญ่เกิน ${sizeLabel(config.max_file_size)} กรุณาแบ่งข้อมูลเป็นไฟล์เล็กลง`); return; }
     setFile(selected);
@@ -229,7 +228,7 @@ export function DataWorkspace() {
         </section> : dataset && job ? <DatasetResults key={`${job.id}:${job.analysis?.generated_at || 'preview'}`} id={job.id} dataset={dataset} analysis={job.analysis} boq={job.boq} document={job.document} conversation={job.conversation} aiReady={Boolean(config?.ai?.configured)} onAnalyze={reanalyze} onRefresh={refresh} retrying={retrying} /> : !jobError && <section className="start">
           <div className="start-intro">
             <h1>อัปโหลดไฟล์ แล้วบอกว่าอยากรู้อะไร</h1>
-            <p>ระบบอ่านไฟล์ Excel หรือ CSV ทุกชีต คำนวณจากทุกแถว แล้วสร้างแดชบอร์ดกับรายงานให้ ถ้าไม่พิมพ์โจทย์ ระบบจะสรุปภาพรวมให้เอง</p>
+            <p>รองรับ Excel, CSV, PDF, Word และรูปภาพตาราง ระบบคำนวณจากทุกแถว แล้วสร้างแดชบอร์ดกับรายงานให้ ถ้าไม่พิมพ์โจทย์ ระบบจะสรุปภาพรวมให้เอง</p>
           </div>
           {configError ? <div className="data-inline-error" role="alert"><p>{configError}</p><button className="office-button" onClick={() => { setConfigError(''); void loadConfig(); }}>เชื่อมต่ออีกครั้ง</button></div> :
           <div className={`composer${dragging ? ' dragging' : ''}`} {...drop}>
@@ -240,7 +239,7 @@ export function DataWorkspace() {
             </div> : <button className="composer-drop" disabled={!config} onClick={() => input.current?.click()}>
               <Upload size={22} strokeWidth={1.8} aria-hidden="true" />
               <span><strong>เลือกไฟล์</strong> หรือลากไฟล์มาวางที่นี่</span>
-              <small>.xlsx .xls .csv · ไม่เกิน {config ? sizeLabel(config.max_file_size) : '25 MB'}</small>
+              <small>Excel, CSV, PDF, Word, รูปภาพ · ไม่เกิน {config ? sizeLabel(config.max_file_size) : '25 MB'}</small>
             </button>}
             <input ref={input} type="file" accept={config?.accepted_extensions.join(',')} aria-label="เลือกไฟล์ข้อมูล" className="data-file-input" tabIndex={-1} onChange={event => { if (event.target.files?.length) selectFiles(event.target.files); event.target.value = ''; }} />
             <textarea id="analysis-objective" className="composer-input" value={objective} maxLength={1000} rows={3} onChange={event => setObjective(event.target.value)} aria-label="โจทย์การวิเคราะห์ (ไม่บังคับ)" placeholder="อยากรู้อะไรจากไฟล์นี้ (ไม่บังคับ) เช่น โครงการไหนใช้งบเกินแผนมากที่สุด" />
@@ -249,15 +248,6 @@ export function DataWorkspace() {
               <button className="office-button primary large" disabled={!file || !config || deleting} onClick={() => void start()}>สร้าง Dashboard และรายงาน <ArrowRight size={17} /></button>
             </div>
           </div>}
-          <div className="start-examples" aria-label="ตัวอย่างโจทย์">
-            <span>ตัวอย่างโจทย์</span>
-            {EXAMPLES.map(example => <button key={example} type="button" onClick={() => setObjective(example)}>{example}</button>)}
-          </div>
-          <ul className="start-facts">
-            <li><Check size={15} aria-hidden="true" />อ่านทุกชีต เซลล์ผสาน และหลายตารางในชีตเดียว</li>
-            <li><Check size={15} aria-hidden="true" />ไม่นับแถวยอดรวมหรือ VAT ซ้ำ</li>
-            <li><Check size={15} aria-hidden="true" />ตัวเลขทุกค่าคำนวณจากไฟล์ ตรวจที่มาได้</li>
-          </ul>
           <footer className="office-footer"><ShieldCheck size={15} aria-hidden="true" />{config ? `ไฟล์เก็บไว้ชั่วคราว ${config.retention_minutes} นาทีแล้วลบอัตโนมัติ · ส่งเพียงแถวแรกของแต่ละชีตให้ AI อ่านโครงสร้าง` : 'ไฟล์ประมวลผลบนเซิร์ฟเวอร์ของระบบ'}</footer>
         </section>}
     </main>

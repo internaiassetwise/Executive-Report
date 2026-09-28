@@ -12,6 +12,7 @@ CLI: worker.py convert <input> <original filename> <output.xlsx>
 import io
 import json
 import re
+import time
 import zipfile
 from html.parser import HTMLParser
 from pathlib import Path
@@ -24,8 +25,12 @@ IMAGES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 CONVERTIBLE = SPREADSHEET_ZIP | IMAGES | {".xls", ".xlsb", ".ods", ".html", ".htm", ".xml", ".json", ".jsonl", ".ndjson", ".docx", ".pdf"}
 MAX_CELLS = 2_000_000
 MAX_PDF_PAGES = 300
-MAX_PICTURE_PAGES = 12
-MAX_PICTURE_SIDE = 2000
+# Scanned pages read by the picture reader (one Gemini request each).
+MAX_PICTURE_PAGES = 30
+MAX_PICTURE_SIDE = 2200
+PICTURE_DPI = 200
+# Parsing tables of text pages; vector-heavy drawings can take minutes, the upload cannot.
+PDF_TABLE_SECONDS = 40
 NUMBER = re.compile(r"^[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$")
 ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 SS = "urn:schemas-microsoft-com:office:spreadsheet"
@@ -70,6 +75,7 @@ class Book:
         self.cells += sum(len(row) for row in rows)
         if self.cells > MAX_CELLS:
             fail("TOO_MANY_CELLS", "ไฟล์มีข้อมูลมากเกินขีดจำกัด กรุณาแบ่งไฟล์ให้เล็กลง")
+        title = typed(title) if isinstance(title, str) else None
         self.sheets.append({"name": name, "rows": ([[title], []] if title else []) + rows})
 
     def picture(self, name, image):
@@ -354,48 +360,67 @@ def from_docx(path, book):
 # --- PDF and pictures -----------------------------------------------------------------
 
 def from_pdf(path, book):
+    """Pages with text give their tables (pdfplumber); scanned pages, and every page when the text
+    holds no table, are rendered as pictures for the picture reader.
+
+    Which pages have text is asked of pdfium (C, milliseconds): pdfplumber's pure-Python parser
+    walks a scanned page's image byte by byte and can take over a minute per page."""
     try:
-        import pdfplumber
+        import pypdfium2 as pdfium
     except ImportError:
         fail("UNSUPPORTED_FORMAT", "เซิร์ฟเวอร์ยังอ่านไฟล์ PDF ไม่ได้")
-    with pdfplumber.open(str(path)) as pdf:
-        pages = pdf.pages[:MAX_PDF_PAGES]
-        if not pages:
+    try:
+        document = pdfium.PdfDocument(str(path))
+    except pdfium.PdfiumError as error:
+        locked = "password" in str(error).lower()
+        fail("INVALID_FILE", "ไฟล์ PDF นี้ตั้งรหัสผ่านไว้ กรุณาบันทึกสำเนาที่ไม่มีรหัสผ่านแล้วอัปโหลดใหม่" if locked
+             else "เปิดไฟล์ PDF ไม่ได้ ไฟล์อาจเสียหาย กรุณาบันทึกหรือพิมพ์เป็น PDF ใหม่แล้วอัปโหลดอีกครั้ง")
+    try:
+        count = min(len(document), MAX_PDF_PAGES)
+        if not count:
             fail("EMPTY_FILE", "ไฟล์ PDF ไม่มีหน้า")
-        text_layer = sum(len(page.chars) for page in pages) >= 30 * len(pages)
-        tables = pdf_tables(pages) if text_layer else []
+        text_pages = [index for index in range(count) if document[index].get_textpage().count_chars() >= 30]
+        tables = pdf_tables(path, text_pages) if text_pages else []
         for index, table in enumerate(tables, 1):
             book.add(f"ตาราง {index}" if len(tables) > 1 else "ตาราง", table["rows"], table["title"])
-        if book.sheets:
-            return "tables"
-        # Scanned pages (or text without any table): the picture reader reads the tables.
-        for number, page in enumerate(pages[:MAX_PICTURE_PAGES], 1):
-            book.picture(f"หน้า {number}", fit(page.to_image(resolution=150).original))
-        return "pictures"
+        # Scanned pages always go to the picture reader; text pages only when their text held no table.
+        pictures = [index for index in range(count) if index not in text_pages] if tables else list(range(count))
+        for index in pictures[:MAX_PICTURE_PAGES]:
+            book.picture(f"หน้า {index + 1}", fit(document[index].render(scale=PICTURE_DPI / 72).to_pil()))
+        return "tables" if tables else "pictures"
+    finally:
+        document.close()
 
 
-def pdf_tables(pages):
-    """Tables of every page; one continuing on the next page (same width) is joined and its repeated header dropped."""
+def pdf_tables(path, text_pages):
+    """Tables of the pages that have text; one continuing on the next page (same width) is joined and
+    its repeated header dropped. Pages after the time budget is spent go to the picture reader instead
+    only when no table was found at all (drawings and heavy vector pages are slow to parse)."""
+    import pdfplumber
     tables = []
-    for number, page in enumerate(pages, 1):
-        ruled = page.find_tables()
-        found = [(table, table.bbox[1]) for table in ruled]
-        if not found:
-            # Tables drawn without lines: keep only grids that look like data, not prose.
-            found = [(table, None) for table in page.find_tables({"vertical_strategy": "text", "horizontal_strategy": "text"})]
-        for position, (table, top) in enumerate(found):
-            rows = [[clean(value) for value in row] for row in table.extract()]
-            rows = [row for row in rows if any(value for value in row)]
-            if len(rows) < 2 or len(rows[0]) < 2 or (top is None and not looks_tabular(rows)):
-                continue
-            last = tables[-1] if tables else None
-            if last and position == 0 and last["page"] == number - 1 and last["width"] == len(rows[0]):
-                if rows[0] == last["rows"][0]:
-                    rows = rows[1:]
-                last["rows"].extend(rows)
-                last["page"] = number
-                continue
-            tables.append({"rows": rows, "width": len(rows[0]), "page": number, "title": line_above(page, top) if position == 0 else None})
+    deadline = time.monotonic() + PDF_TABLE_SECONDS
+    with pdfplumber.open(str(path)) as pdf:
+        for index in text_pages:
+            if time.monotonic() > deadline:
+                break
+            page, number = pdf.pages[index], index + 1
+            found = [(table, table.bbox[1]) for table in page.find_tables()]
+            if not found:
+                # Tables drawn without lines: keep only grids that look like data, not prose.
+                found = [(table, None) for table in page.find_tables({"vertical_strategy": "text", "horizontal_strategy": "text"})]
+            for position, (table, top) in enumerate(found):
+                rows = [[clean(value) for value in row] for row in table.extract()]
+                rows = [row for row in rows if any(value for value in row)]
+                if len(rows) < 2 or len(rows[0]) < 2 or (top is None and not looks_tabular(rows)):
+                    continue
+                last = tables[-1] if tables else None
+                if last and position == 0 and last["page"] == number - 1 and last["width"] == len(rows[0]):
+                    if rows[0] == last["rows"][0]:
+                        rows = rows[1:]
+                    last["rows"].extend(rows)
+                    last["page"] = number
+                    continue
+                tables.append({"rows": rows, "width": len(rows[0]), "page": number, "title": line_above(page, top) if position == 0 else None})
     return tables
 
 

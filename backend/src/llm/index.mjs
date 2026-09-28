@@ -24,9 +24,11 @@ export function createLlm({ provider = 'gemini', apiKey, model, baseUrl, fetcher
     name: provider, model,
     async generateJson(request) {
       if (budget && !budget.reserve()) throw new LlmError('budget', 'daily AI request limit reached');
-      const signal = AbortSignal.any([...(request.signal ? [request.signal] : []), AbortSignal.timeout(timeoutMs)]);
+      // request.timeoutMs: a longer limit for work that is slow by nature (reading a scanned page).
+      const { timeoutMs: ownTimeout, ...rest } = request;
+      const signal = AbortSignal.any([...(request.signal ? [request.signal] : []), AbortSignal.timeout(ownTimeout || timeoutMs)]);
       try {
-        const result = await inner.generateJson({ ...request, signal });
+        const result = await inner.generateJson({ ...rest, signal });
         budget?.record(model, result.usage);
         return result;
       } catch (error) {

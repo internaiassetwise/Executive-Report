@@ -20,7 +20,7 @@ const exportWorkerPath = fileURLToPath(new URL('../datasets/exports.py', import.
 const documentWorkerPath = fileURLToPath(new URL('../datasets/document.py', import.meta.url));
 const defaults = {
   maxFileSize: 25 * MiB, maxRows: 100_000, maxColumns: 200, maxCells: 2_000_000,
-  retentionMinutes: 60, maxConcurrent: 2, maxStored: 20, timeoutMs: 120_000,
+  retentionMinutes: 60, maxConcurrent: 2, maxStored: 20, timeoutMs: 300_000,
   previewTimeoutMs: 30_000, maxPreviews: 2, pythonBin: 'python', tempBase: tmpdir(),
   autoAnalyze: false, model: DEFAULT_DATASET_MODEL, aiTimeoutMs: 45_000, maxExports: 1,
 };
@@ -41,7 +41,8 @@ export function datasetConfigFromEnv(env = process.env) {
     retentionMinutes: integer(env.DATASET_RETENTION_MINUTES, 60, 1, 1440, 'DATASET_RETENTION_MINUTES'),
     maxConcurrent: integer(env.DATASET_MAX_CONCURRENT, 2, 1, 8, 'DATASET_MAX_CONCURRENT'),
     maxStored: integer(env.DATASET_MAX_STORED, 20, 1, 100, 'DATASET_MAX_STORED'),
-    timeoutMs: integer(env.DATASET_TIMEOUT_SECONDS, 120, 5, 600, 'DATASET_TIMEOUT_SECONDS') * 1000,
+    // Large workbooks and scanned PDFs take minutes; the upload itself answers at once and is polled.
+    timeoutMs: integer(env.DATASET_TIMEOUT_SECONDS, 300, 5, 900, 'DATASET_TIMEOUT_SECONDS') * 1000,
     aiTimeoutMs: integer(env.GEMINI_TIMEOUT_SECONDS, 45, 5, 120, 'GEMINI_TIMEOUT_SECONDS') * 1000,
     pythonBin: env.PYTHON_BIN || 'python',
     tempBase: env.DATASET_TEMP_DIR || tmpdir(),
@@ -306,10 +307,14 @@ export function createDatasetService(options = {}) {
       job.stage = 'understanding_columns';
       await worker(job, ['sample', input, filename, samplePath, JSON.stringify(limits)], undefined, config.timeoutMs, job.controller.signal);
       const sample = JSON.parse(await readFile(samplePath, 'utf8'));
+      // A workbook of pasted pictures (next to a title or two) has its data in the pictures.
+      const cells = (sample.sheets || []).reduce((sum, sheet) => sum + (sheet.rows || []).reduce((count, row) => count + Object.keys(row.cells || {}).length, 0), 0);
+      const picturesAreData = pictures || (sample.images?.length > 0 && cells < 12);
+      job.sampleImages = sample.images?.length || 0;
       // Table positions and the pictures' contents are read in parallel; either may fail alone.
       const [layouts, images] = await Promise.allSettled([
         planLayouts(sample, config.llm, job.controller.signal),
-        describeImages(sample.images, config.llm, job.controller.signal, { pages: pictures }),
+        describeImages(sample.images, config.llm, job.controller.signal, { pages: picturesAreData }),
       ]);
       if (job.controller.signal.aborted) throw job.controller.signal.reason;
       for (const [name, outcome] of [['layout', layouts], ['images', images]]) {
@@ -568,7 +573,13 @@ export function createDatasetService(options = {}) {
             if (!jobs.has(id)) return;
             if (['reading', 'validating', 'understanding_columns', 'detecting_types', 'preview'].includes(event.stage)) job.stage = event.stage;
             job.progress = Math.max(job.progress, Math.min(config.autoAnalyze ? 35 : 99, Math.max(0, config.autoAnalyze ? 5 + event.progress * 0.3 : event.progress)));
-          }, config.timeoutMs, job.controller.signal);
+          }, config.timeoutMs, job.controller.signal).catch(error => {
+            // No rows at all usually means the data is in pictures; say what would make it readable.
+            if (error?.code !== 'EMPTY_DATASET') throw error;
+            throw fail('EMPTY_DATASET', !config.llm
+              ? 'ไม่พบตารางข้อมูลในไฟล์ หากข้อมูลอยู่ในรูปภาพ (ภาพวาง ภาพสแกน) ต้องเปิดใช้ AI บนเซิร์ฟเวอร์เพื่ออ่านตาราง'
+              : job.sampleImages ? 'ไฟล์นี้มีตารางอยู่ในรูปภาพ แต่อ่านตารางจากรูปไม่สำเร็จ กรุณาใช้ภาพที่คมชัด หรืออัปโหลดไฟล์ต้นฉบับที่เป็นเซลล์ข้อมูล' : error.message);
+          });
           // The user sees the name they uploaded, and where the table came from when it was converted.
           if (jobs.has(id)) job.dataset = { ...result, filename, ...(job.convertedFrom ? { converted_from: job.convertedFrom } : {}) };
           // A BOQ comparison workbook also gets the benchmark report; it needs the original file.

@@ -123,9 +123,75 @@ class ConvertTests(unittest.TestCase):
         self.assertEqual(sheet["columns"][0]["name"], "Region")
 
     def test_broken_files_fail_clearly(self):
-        for name, content in (("bad.docx", b"not a zip"), ("bad.json", "{oops"), ("bad.ods", b"PK\x03\x04broken")):
+        for name, content in (("bad.docx", b"not a zip"), ("bad.json", "{oops"), ("bad.ods", b"PK\x03\x04broken"), ("bad.pdf", b"%PDF-1.4 broken")):
             with self.assertRaises(DatasetError):
                 self.run_file(name, content)
+
+    def scanned_page(self, label):
+        """A picture-only PDF page (a scan): no text layer at all."""
+        from PIL import Image, ImageDraw
+        picture = Image.new("RGB", (1200, 1600), "white")
+        ImageDraw.Draw(picture).rectangle((100, 100, 1100, 300), outline="black", width=4)
+        picture.save(self.root / f"{label}.png")
+        return self.root / f"{label}.png"
+
+    def test_scanned_and_mixed_pdfs(self):
+        from openpyxl import load_workbook
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+        scan = self.root / "scan.pdf"
+        page = canvas.Canvas(str(scan), pagesize=A4)
+        for label in ("one", "two", "three"):
+            page.drawImage(str(self.scanned_page(label)), 0, 0, *A4)
+            page.showPage()
+        page.save()
+        output = self.root / "scan.xlsx"
+        self.assertEqual(convert(scan, "scan.pdf", output)["kind"], "pictures")
+        book = load_workbook(output)
+        self.assertEqual(book.sheetnames, ["หน้า 1", "หน้า 2", "หน้า 3"], "every scanned page is sent, in order")
+        self.assertTrue(all(len(sheet._images) == 1 for sheet in book.worksheets))
+        # A text page with a table next to a scanned page: the table is read, the scan goes to the picture reader.
+        mixed = self.root / "mixed.pdf"
+        page = canvas.Canvas(str(mixed), pagesize=A4)
+        page.drawString(60, 790, "Price list \x0b 2026")
+        for index, row in enumerate(ROWS):
+            for column, value in enumerate(row):
+                page.drawString(60 + column * 150, 750 - index * 20, value)
+        page.grid([50, 200, 350], [760 - index * 20 for index in range(len(ROWS) + 1)])
+        page.showPage()
+        page.drawImage(str(self.scanned_page("four")), 0, 0, *A4)
+        page.showPage()
+        page.save()
+        output = self.root / "mixed.xlsx"
+        self.assertEqual(convert(mixed, "mixed.pdf", output)["kind"], "tables")
+        book = load_workbook(output)
+        self.assertEqual(book.sheetnames, ["ตาราง", "หน้า 2"])
+
+    def test_locked_pdf_says_so(self):
+        from reportlab.pdfgen import canvas
+        locked = self.root / "locked.pdf"
+        page = canvas.Canvas(str(locked), encrypt="secret")
+        page.drawString(100, 700, "Region Amount")
+        page.save()
+        with self.assertRaises(DatasetError) as caught:
+            convert(locked, "locked.pdf", self.root / "locked.xlsx")
+        self.assertIn("รหัสผ่าน", caught.exception.message)
+
+    def test_workbook_pictures_in_any_format_are_sent(self):
+        import openpyxl
+        from openpyxl.drawing.image import Image as Picture
+        from PIL import Image
+        book = openpyxl.Workbook()
+        book.active["A1"] = "ใบเสนอราคา"
+        Image.new("RGB", (900, 500), "white").save(self.root / "table.bmp")
+        Image.new("RGB", (60, 30), "navy").save(self.root / "logo.png")
+        book.active.add_image(Picture(str(self.root / "logo.png")), "A2")
+        book.active.add_image(Picture(str(self.root / "table.bmp")), "A5")
+        path = self.root / "pictures.xlsx"
+        book.save(path)
+        images = sample(path, "pictures.xlsx", None, self.root / "images")["images"]
+        self.assertEqual([image["cell"] for image in images], ["A5"], "the BMP is converted; a tiny logo is not worth sending")
+        self.assertEqual(images[0]["mime_type"], "image/jpeg")
 
 
 def zipped(files):

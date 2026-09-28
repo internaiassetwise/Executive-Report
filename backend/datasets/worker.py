@@ -811,7 +811,7 @@ def image_tables(connection, state, result, notes, limits):
         if not isinstance(table, dict) or not isinstance(table.get("columns"), list) or not isinstance(table.get("rows"), list):
             continue
         names = [clean_text(str(name))[:120] for name in table["columns"][:60] if isinstance(name, (str, int, float)) and not isinstance(name, bool)]
-        rows = [row for row in table["rows"][:500] if isinstance(row, list)]
+        rows = [row for row in table["rows"][:5000] if isinstance(row, list)]
         if not names or not rows:
             continue
         where = " ".join(filter(None, [str(note.get("sheet") or "")[:60], str(note.get("cell") or "")[:10]]))

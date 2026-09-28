@@ -9,6 +9,7 @@ intermediate representation (IR), which is what the planner sees.
 """
 from __future__ import annotations
 
+import io
 import posixpath
 import re
 import zipfile
@@ -17,8 +18,11 @@ from xml.etree import ElementTree
 MAX_MERGES = 20_000
 MAX_HIDDEN_ROWS = 50_000
 MAX_LISTED = 40
-MAX_IMAGES = 12
+# Pictures sent to the picture reader: a scanned PDF becomes one picture per page.
+MAX_IMAGES = 30
 MAX_IMAGE_BYTES = 4_000_000
+# Larger pictures are shrunk before they are sent; beyond this they are not opened at all.
+MAX_SOURCE_IMAGE_BYTES = 40_000_000
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
                ".bmp": "image/bmp", ".emf": "image/emf", ".wmf": "image/wmf", ".tif": "image/tiff", ".tiff": "image/tiff"}
 # Formats a vision model reads; the others are listed in the IR only.
@@ -337,20 +341,44 @@ def scan(path, check=None):
 
 
 def extract_images(path, facts, directory):
-    """Write the images a vision model can read (bounded in number and size). Returns their descriptors."""
+    """Write the images a vision model can read (bounded in number and size). Returns their descriptors.
+
+    The largest pictures go first (a pasted table outweighs a logo). A picture that is too large or
+    in a format the model does not take (BMP, TIFF, GIF, a huge screenshot) is converted to a JPEG
+    of at most 2000 px; one that cannot be opened at all (EMF/WMF on Linux) is skipped."""
     chosen = []
+    order = {image["id"]: index for index, image in enumerate(facts["images"])}
     with zipfile.ZipFile(path) as archive:
         seen = set()
-        for image in facts["images"]:
-            if len(chosen) >= MAX_IMAGES or image["part"] in seen:
-                continue
-            if image["content_type"] not in VISION_TYPES or not 1_000 <= image["bytes"] <= MAX_IMAGE_BYTES:
+        for image in sorted(facts["images"], key=lambda item: -item["bytes"]):
+            if len(chosen) >= MAX_IMAGES or image["part"] in seen or image["bytes"] < 1_000 or image["bytes"] > MAX_SOURCE_IMAGE_BYTES:
                 continue
             seen.add(image["part"])
-            target = directory / f"{image['id']}{posixpath.splitext(image['part'])[1].casefold()}"
-            target.write_bytes(archive.read(image["part"]))
-            chosen.append({"id": image["id"], "sheet": image["sheet"], "cell": image["cell"], "mime_type": image["content_type"], "path": str(target)})
-    return chosen
+            data, mime = archive.read(image["part"]), image["content_type"]
+            if mime not in VISION_TYPES or len(data) > MAX_IMAGE_BYTES:
+                data, mime = as_jpeg(data), "image/jpeg"
+                if data is None:
+                    continue
+            target = directory / f"{image['id']}{'.jpg' if mime == 'image/jpeg' else posixpath.splitext(image['part'])[1].casefold()}"
+            target.write_bytes(data)
+            chosen.append({"id": image["id"], "sheet": image["sheet"], "cell": image["cell"], "mime_type": mime, "path": str(target)})
+    # Chosen by size, returned in the workbook's order: pages of a scan stay in page order.
+    return sorted(chosen, key=lambda item: order[item["id"]])
+
+
+def as_jpeg(data):
+    """A picture as a JPEG of at most 2000 px a side, or None when it cannot be opened."""
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as picture:
+            picture.load()
+            picture = picture.convert("RGB")
+            picture.thumbnail((2000, 2000))
+            buffer = io.BytesIO()
+            picture.save(buffer, format="JPEG", quality=85)
+    except Exception:
+        return None
+    return buffer.getvalue() if len(buffer.getvalue()) <= MAX_IMAGE_BYTES else None
 
 
 def locate(ref, result, default_sheet=None):
